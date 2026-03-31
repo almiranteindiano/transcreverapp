@@ -192,7 +192,7 @@ export default function TranscreveAI() {
           setTranscriptions(prev => prev.map(t => t.id === payload.new.id ? payload.new as Transcription : t));
           setSelectedTranscription(prev => prev?.id === payload.new.id ? payload.new as Transcription : prev);
         } else if (payload.eventType === 'DELETE') {
-          setTranscriptions(prev => prev.filter(t => t.id === payload.old.id));
+          setTranscriptions(prev => prev.filter(t => t.id !== payload.old.id));
           setSelectedTranscription(prev => prev?.id === payload.old.id ? null : prev);
         }
       })
@@ -358,9 +358,21 @@ export default function TranscreveAI() {
         }
       } catch (geminiErr: any) {
         console.error('Gemini Error:', geminiErr);
+        let userFriendlyError = 'A IA não conseguiu processar este arquivo. Verifique se o formato é suportado.';
+        
+        if (geminiErr.message?.includes('API key not valid')) {
+          userFriendlyError = 'Sua Chave de API do Google (Gemini) é inválida ou não foi configurada corretamente na Vercel.';
+        } else if (geminiErr.message?.includes('quota')) {
+          userFriendlyError = 'Limite de uso da IA atingido. Tente novamente mais tarde.';
+        }
+
         // Atualizar status para falha no banco
-        await supabase.from('transcriptions').update({ status: 'failed', original_text: 'Erro no processamento da IA.' }).eq('id', transcriptionData.id);
-        throw new Error('A IA não conseguiu processar este arquivo. Verifique se o formato é suportado.');
+        await supabase.from('transcriptions').update({ 
+          status: 'failed', 
+          original_text: `Erro: ${userFriendlyError}` 
+        }).eq('id', transcriptionData.id);
+        
+        throw new Error(userFriendlyError);
       }
 
       // Atualizar com o resultado final
@@ -409,12 +421,24 @@ export default function TranscreveAI() {
   };
 
   const handleDelete = async (id: string) => {
-    if (confirm('Deseja realmente excluir esta transcrição?')) {
-      await supabase
-        .from('transcriptions')
-        .delete()
-        .eq('id', id);
-      if (selectedTranscription?.id === id) setSelectedTranscription(null);
+    const confirmed = window.confirm('Deseja realmente excluir esta transcrição?');
+    if (confirmed) {
+      try {
+        // Optimistic update
+        setTranscriptions(prev => prev.filter(t => t.id !== id));
+        if (selectedTranscription?.id === id) setSelectedTranscription(null);
+
+        const { error } = await supabase
+          .from('transcriptions')
+          .delete()
+          .eq('id', id);
+        
+        if (error) throw error;
+      } catch (err) {
+        console.error('Erro ao deletar:', err);
+        alert('Erro ao excluir a transcrição.');
+        // Rollback if needed (could re-fetch, but for simplicity we just alert)
+      }
     }
   };
 
@@ -590,32 +614,40 @@ export default function TranscreveAI() {
 
                 <div className="space-y-1">
                   <p className="text-[10px] font-bold text-gray-400 uppercase tracking-widest px-2 mb-2">Recentes</p>
-                  {filteredTranscriptions.map((t) => (
-                    <button
-                      key={t.id}
-                      onClick={() => { setSelectedTranscription(t); setIsSidebarOpen(false); }}
-                      className={cn(
-                        'w-full p-3 rounded-xl flex items-center gap-3 transition-all text-left group',
-                        selectedTranscription?.id === t.id ? 'bg-blue-50 text-blue-700' : 'hover:bg-gray-50 text-gray-600'
-                      )}
-                    >
-                      <div className={cn(
-                        'p-2 rounded-lg',
-                        selectedTranscription?.id === t.id ? 'bg-blue-100' : 'bg-gray-100 group-hover:bg-white'
-                      )}>
-                        {t.source === 'upload' ? <Upload className="w-4 h-4" /> : 
-                         t.source === 'youtube' ? <Youtube className="w-4 h-4" /> :
-                         t.source === 'instagram' ? <Instagram className="w-4 h-4" /> : <HardDrive className="w-4 h-4" />}
-                      </div>
-                      <div className="flex-1 min-w-0">
-                        <p className="text-sm font-semibold truncate">{t.title}</p>
-                        <p className="text-[10px] opacity-60">
-                          {new Date(t.created_at).toLocaleDateString('pt-BR')}
-                        </p>
-                      </div>
-                      {t.status === 'processing' && <Loader2 className="w-3 h-3 animate-spin text-blue-400" />}
-                    </button>
-                  ))}
+                      {filteredTranscriptions.map((t) => (
+                        <div key={t.id} className="relative group">
+                          <button
+                            onClick={() => { setSelectedTranscription(t); setIsSidebarOpen(false); }}
+                            className={cn(
+                              'w-full p-3 rounded-xl flex items-center gap-3 transition-all text-left',
+                              selectedTranscription?.id === t.id ? 'bg-blue-50 text-blue-700' : 'hover:bg-gray-50 text-gray-600'
+                            )}
+                          >
+                            <div className={cn(
+                              'p-2 rounded-lg',
+                              selectedTranscription?.id === t.id ? 'bg-blue-100' : 'bg-gray-100 group-hover:bg-white'
+                            )}>
+                              {t.source === 'upload' ? <Upload className="w-4 h-4" /> : 
+                               t.source === 'youtube' ? <Youtube className="w-4 h-4" /> :
+                               t.source === 'instagram' ? <Instagram className="w-4 h-4" /> : <HardDrive className="w-4 h-4" />}
+                            </div>
+                            <div className="flex-1 min-w-0">
+                              <p className="text-sm font-semibold truncate">{t.title}</p>
+                              <p className="text-[10px] opacity-60">
+                                {new Date(t.created_at).toLocaleDateString('pt-BR')}
+                              </p>
+                            </div>
+                            {t.status === 'processing' && <Loader2 className="w-3 h-3 animate-spin text-blue-400" />}
+                          </button>
+                          <button 
+                            onClick={(e) => { e.stopPropagation(); handleDelete(t.id); }}
+                            className="absolute right-2 top-1/2 -translate-y-1/2 p-2 opacity-0 group-hover:opacity-100 hover:bg-red-50 hover:text-red-600 rounded-lg transition-all text-gray-400"
+                            title="Excluir"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      ))}
                 </div>
               </div>
 
@@ -650,21 +682,25 @@ export default function TranscreveAI() {
               </h2>
             </div>
 
-            {selectedTranscription && selectedTranscription.status === 'completed' && (
+            {selectedTranscription && (
               <div className="flex items-center gap-1 sm:gap-2">
-                <div className="hidden sm:flex items-center gap-2">
-                  <Button variant="outline" onClick={() => exportToPDF(selectedTranscription.title, selectedTranscription.translated_text || selectedTranscription.original_text)}>
-                    <Download className="w-4 h-4" /> PDF
-                  </Button>
-                  <Button variant="outline" onClick={() => exportToWord(selectedTranscription.title, selectedTranscription.translated_text || selectedTranscription.original_text)}>
-                    <Download className="w-4 h-4" /> Word
-                  </Button>
-                </div>
-                <div className="sm:hidden">
-                  <Button variant="outline" className="p-2" onClick={() => exportToPDF(selectedTranscription.title, selectedTranscription.translated_text || selectedTranscription.original_text)}>
-                    <Download className="w-4 h-4" />
-                  </Button>
-                </div>
+                {selectedTranscription.status === 'completed' && (
+                  <>
+                    <div className="hidden sm:flex items-center gap-2">
+                      <Button variant="outline" onClick={() => exportToPDF(selectedTranscription.title, selectedTranscription.translated_text || selectedTranscription.original_text)}>
+                        <Download className="w-4 h-4" /> PDF
+                      </Button>
+                      <Button variant="outline" onClick={() => exportToWord(selectedTranscription.title, selectedTranscription.translated_text || selectedTranscription.original_text)}>
+                        <Download className="w-4 h-4" /> Word
+                      </Button>
+                    </div>
+                    <div className="sm:hidden">
+                      <Button variant="outline" className="p-2" onClick={() => exportToPDF(selectedTranscription.title, selectedTranscription.translated_text || selectedTranscription.original_text)}>
+                        <Download className="w-4 h-4" />
+                      </Button>
+                    </div>
+                  </>
+                )}
                 <Button variant="danger" className="p-2 sm:px-4" onClick={() => handleDelete(selectedTranscription.id)}>
                   <Trash2 className="w-4 h-4" />
                 </Button>

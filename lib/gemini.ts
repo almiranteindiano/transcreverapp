@@ -65,7 +65,7 @@ export async function transcribeUrl(url: string, prompt: string): Promise<string
   } catch (error: any) {
     console.error('Erro ao transcrever URL:', error);
     if (error.message?.includes('not supported') || error.message?.includes('blocked')) {
-      return "ERRO: Este link específico não pode ser acessado diretamente pela IA (pode ser restrição do site ou link privado). \n\nSUGESTÃO: Tente baixar o vídeo/áudio e usar a opção de 'Upload' do arquivo.";
+      throw new Error("Este link não pode ser acessado diretamente pela IA. Tente baixar o arquivo e fazer o upload.");
     }
     throw error;
   }
