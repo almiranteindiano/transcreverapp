@@ -1,5 +1,5 @@
 {
-  "name": "TranscreveAI - Transcrição de Vídeos e Áudios",
-  "description": "Transcreva vídeos do YouTube, Instagram, Drive e uploads locais com tradução automática e exportação para Word, PDF e TXT.",
-  "requestFramePermissions": ["camera", "microphone"]
+  "name": "Worship Chords & Lyrics - Equipe de Louvor",
+  "description": "Sistema intuitivo para músicos e cantores de louvor. Gerencie cifras, transponha tons, crie setlists e compartilhe letras e acordes via WhatsApp, PDF e Word.",
+  "requestFramePermissions": []
 }

@@ -1,1073 +1,882 @@
 'use client';
 
-import React, { useState, useEffect, useCallback } from 'react';
-import { supabase } from '@/lib/supabase';
-import { transcribeMedia, translateText, transcribeUrl } from '@/lib/gemini';
-import { exportToPDF, exportToWord, exportToTXT } from '@/lib/export';
-import { ErrorBoundary } from '@/components/ErrorBoundary';
+import React, { useState, useEffect, useMemo } from 'react';
 import { 
-  Mic, Video, Upload, Youtube, Instagram, HardDrive, 
-  Download, Trash2, Languages, Clock, FileText, LogOut, 
-  Plus, Search, Loader2, CheckCircle2, AlertCircle, Menu, X,
-  ChevronRight, FileAudio, FileVideo, Globe, History
+  Music, FileText, ListMusic, Plus, Search, 
+  Download, Share2, Trash2, Edit3, Save, 
+  ChevronRight, ChevronLeft, Upload, FileDown,
+  ArrowRightLeft, Palette, Check, X, Copy,
+  Printer, MessageCircle, Menu, LogOut, Bell, Calendar
 } from 'lucide-react';
-import { useDropzone } from 'react-dropzone';
 import { motion, AnimatePresence } from 'motion/react';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
-import { User } from '@supabase/supabase-js';
+import { jsPDF } from 'jspdf';
+import { Document, Packer, Paragraph, TextRun } from 'docx';
+import { saveAs } from 'file-saver';
 
 function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
 }
 
 // --- Types ---
-interface Transcription {
+interface Song {
   id: string;
-  user_id: string;
   title: string;
-  source: 'upload' | 'youtube' | 'instagram' | 'drive';
-  original_text: string;
-  translated_text?: string;
-  language?: string;
-  status: 'pending' | 'processing' | 'completed' | 'failed';
-  created_at: string;
-  include_timestamps: boolean;
-  file_url?: string;
-  file_name?: string;
+  artist: string;
+  content: string;
+  type: 'chord' | 'lyric';
+  key: string;
+  originalKey: string;
 }
 
-// --- Components ---
+interface Setlist {
+  id: string;
+  name: string;
+  date: string;
+  songs: string[]; // IDs of songs
+}
 
-const Button = ({ 
-  children, onClick, className, variant = 'primary', disabled, loading 
-}: { 
-  children: React.ReactNode, onClick?: () => void, className?: string, 
-  variant?: 'primary' | 'secondary' | 'danger' | 'ghost' | 'outline',
-  disabled?: boolean, loading?: boolean
-}) => {
-  const variants = {
-    primary: 'bg-blue-600 text-white hover:bg-blue-700 shadow-lg shadow-blue-200',
-    secondary: 'bg-gray-100 text-gray-900 hover:bg-gray-200',
-    danger: 'bg-red-50 text-red-600 hover:bg-red-100',
-    ghost: 'bg-transparent text-gray-600 hover:bg-gray-100',
-    outline: 'bg-transparent border border-gray-200 text-gray-600 hover:border-blue-400 hover:text-blue-600'
-  };
+interface Notice {
+  id: string;
+  title: string;
+  content: string;
+  date: string;
+  type: 'aviso' | 'escala';
+}
 
-  return (
-    <button
-      onClick={onClick}
-      disabled={disabled || loading}
-      className={cn(
-        'px-4 py-2 rounded-xl font-medium transition-all flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed active:scale-95',
-        variants[variant],
-        className
-      )}
-    >
-      {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : children}
-    </button>
-  );
+// --- Constants ---
+const NOTES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
+const FLATS: Record<string, string> = { 'Db': 'C#', 'Eb': 'D#', 'Gb': 'F#', 'Ab': 'G#', 'Bb': 'A#' };
+
+// --- Utils ---
+const transposeChord = (chord: string, semitones: number): string => {
+  const match = chord.match(/^([A-G][b#]?)(.*)$/);
+  if (!match) return chord;
+  
+  let note = match[1];
+  const suffix = match[2];
+  
+  if (FLATS[note]) note = FLATS[note];
+  
+  const index = NOTES.indexOf(note);
+  if (index === -1) return chord;
+  
+  let newIndex = (index + semitones) % 12;
+  if (newIndex < 0) newIndex += 12;
+  
+  return NOTES[newIndex] + suffix;
 };
 
-const Card = ({ children, className }: { children: React.ReactNode, className?: string }) => (
-  <div className={cn('bg-white rounded-2xl border border-gray-100 shadow-sm overflow-hidden', className)}>
-    {children}
-  </div>
-);
-
-const Badge = ({ children, variant = 'default' }: { children: React.ReactNode, variant?: 'default' | 'success' | 'warning' | 'error' | 'info' }) => {
-  const variants = {
-    default: 'bg-gray-100 text-gray-600',
-    success: 'bg-green-50 text-green-600',
-    warning: 'bg-amber-50 text-amber-600',
-    error: 'bg-red-50 text-red-600',
-    info: 'bg-blue-50 text-blue-600'
-  };
-  return (
-    <span className={cn('px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider', variants[variant])}>
-      {children}
-    </span>
-  );
-};
-
-// --- Main App ---
-
-export default function TranscreveAI() {
-  const [user, setUser] = useState<User | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [authLoading, setAuthLoading] = useState(false);
-  const [email, setEmail] = useState('');
-  const [password, setPassword] = useState('');
-  const [isSignUp, setIsSignUp] = useState(false);
-  const [transcriptions, setTranscriptions] = useState<Transcription[]>([]);
-  const [selectedTranscription, setSelectedTranscription] = useState<Transcription | null>(null);
-  const [isSidebarOpen, setIsSidebarOpen] = useState(false);
-  const [isMobile, setIsMobile] = useState(false);
-  const [isNewModalOpen, setIsNewModalOpen] = useState(false);
-  const [searchQuery, setSearchQuery] = useState('');
-
-  // Form State
-  const [newTitle, setNewTitle] = useState('');
-  const [newSource, setNewSource] = useState<'upload' | 'youtube' | 'instagram' | 'drive'>('upload');
-  const [newUrl, setNewUrl] = useState('');
-  const [newFile, setNewFile] = useState<File | null>(null);
-  const [includeTimestamps, setIncludeTimestamps] = useState(true);
-  const [isProcessing, setIsProcessing] = useState(false);
-  const [processingStep, setProcessingStep] = useState<'uploading' | 'transcribing' | 'translating' | 'idle'>('idle');
-  const [uploadProgress, setUploadProgress] = useState(0);
-
-  // Translation State
-  const [targetLang, setTargetLang] = useState('Inglês');
-  const [isTranslating, setIsTranslating] = useState(false);
-  const [configError, setConfigError] = useState<string | null>(null);
-
-  useEffect(() => {
-    const checkMobile = () => {
-      setIsMobile(window.innerWidth < 1024);
-    };
-    checkMobile();
-    window.addEventListener('resize', checkMobile);
-    return () => window.removeEventListener('resize', checkMobile);
-  }, []);
-
-  useEffect(() => {
-    const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
-    const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
-
-    if (!supabaseUrl || !supabaseAnonKey) {
-      setConfigError('Configuração do Supabase ausente. Por favor, configure NEXT_PUBLIC_SUPABASE_URL e NEXT_PUBLIC_SUPABASE_ANON_KEY nas configurações do projeto.');
-      setLoading(false);
-      return;
+const transposeContent = (content: string, semitones: number): string => {
+  const chordRegex = /\b[A-G][b#]?(m|maj|min|aug|dim|sus|add|2|4|5|6|7|9|11|13)*(\/[A-G][b#]?)?\b/g;
+  return content.replace(chordRegex, (match) => {
+    if (match.includes('/')) {
+      const [base, bass] = match.split('/');
+      return transposeChord(base, semitones) + '/' + transposeChord(bass, semitones);
     }
-
-    // Check initial session
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      setUser(session?.user ?? null);
-      setLoading(false);
-    }).catch(err => {
-      console.error('Session check error:', err);
-      setLoading(false);
-    });
-
-    // Listen for auth changes
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
-      setUser(session?.user ?? null);
-      setLoading(false);
-    });
-
-    return () => subscription.unsubscribe();
-  }, []);
-
-  useEffect(() => {
-    if (!user) return;
-
-    const fetchTranscriptions = async () => {
-      const { data, error } = await supabase
-        .from('transcriptions')
-        .select('*')
-        .eq('user_id', user.id)
-        .order('created_at', { ascending: false });
-
-      if (error) {
-        console.error('Error fetching transcriptions:', error);
-      } else {
-        setTranscriptions(data as Transcription[]);
-      }
-    };
-
-    fetchTranscriptions();
-
-    // Real-time subscription
-    const channel = supabase
-      .channel('transcriptions_changes')
-      .on('postgres_changes', { 
-        event: '*', 
-        schema: 'public', 
-        table: 'transcriptions',
-        filter: `user_id=eq.${user.id}`
-      }, (payload) => {
-        if (payload.eventType === 'INSERT') {
-          setTranscriptions(prev => [payload.new as Transcription, ...prev]);
-        } else if (payload.eventType === 'UPDATE') {
-          setTranscriptions(prev => prev.map(t => t.id === payload.new.id ? payload.new as Transcription : t));
-          setSelectedTranscription(prev => prev?.id === payload.new.id ? payload.new as Transcription : prev);
-        } else if (payload.eventType === 'DELETE') {
-          setTranscriptions(prev => prev.filter(t => t.id !== payload.old.id));
-          setSelectedTranscription(prev => prev?.id === payload.old.id ? null : prev);
-        }
-      })
-      .subscribe();
-
-    return () => {
-      supabase.removeChannel(channel);
-    };
-  }, [user]);
-
-  const handleLogin = async () => {
-    setAuthLoading(true);
-    try {
-      const origin = typeof window !== 'undefined' ? window.location.origin : '';
-      
-      const { data, error } = await supabase.auth.signInWithOAuth({
-        provider: 'google',
-        options: {
-          redirectTo: origin,
-          queryParams: {
-            access_type: 'offline',
-            prompt: 'consent',
-          },
-        }
-      });
-      
-      if (error) {
-        console.error('Supabase Auth Error Detail:', error);
-        throw error;
-      }
-      
-      if (data?.url) {
-        console.log('Redirecionando para:', data.url);
-      }
-    } catch (err: any) {
-      console.error('Login error:', err);
-      const errorMsg = err.message || 'Erro desconhecido';
-      alert(`Erro de Autenticação: ${errorMsg}\n\nVerifique se:\n1. O App está "Publicado" no Google Cloud.\n2. O User Type é "External".\n3. O Client ID no Supabase está correto.`);
-    } finally {
-      setAuthLoading(false);
-    }
-  };
-
-  const handleEmailAuth = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!email || !password) {
-      alert('Por favor, preencha todos os campos.');
-      return;
-    }
-
-    setAuthLoading(true);
-    try {
-      if (isSignUp) {
-        const { error } = await supabase.auth.signUp({
-          email,
-          password,
-        });
-        if (error) throw error;
-        alert('Cadastro realizado! Verifique seu e-mail para confirmar (se ativado no Supabase).');
-      } else {
-        const { error } = await supabase.auth.signInWithPassword({
-          email,
-          password,
-        });
-        if (error) throw error;
-      }
-    } catch (err: any) {
-      console.error('Auth error:', err);
-      alert(`Erro: ${err.message || 'Falha na autenticação'}`);
-    } finally {
-      setAuthLoading(false);
-    }
-  };
-
-  const handleLogout = async () => {
-    await supabase.auth.signOut();
-    setSelectedTranscription(null);
-  };
-
-  const onDrop = useCallback((acceptedFiles: File[]) => {
-    setNewFile(acceptedFiles[0]);
-    if (!newTitle) setNewTitle(acceptedFiles[0].name.split('.')[0]);
-  }, [newTitle]);
-
-  const { getRootProps, getInputProps, isDragActive } = useDropzone({ 
-    onDrop, 
-    accept: { 'video/*': [], 'audio/*': [] },
-    multiple: false 
+    return transposeChord(match, semitones);
   });
+};
 
-  const handleCreateTranscription = async () => {
-    if (!user || (!newFile && !newUrl)) return;
-
-    // Limite de 50MB (limite padrão do Supabase Storage Free)
-    const MAX_FILE_SIZE = 50 * 1024 * 1024; 
-    if (newFile && newFile.size > MAX_FILE_SIZE) {
-      alert('O arquivo é muito grande. O limite máximo é de 50MB. Para vídeos maiores, tente extrair apenas o áudio ou use um link do YouTube.');
-      return;
+const highlightChords = (text: string) => {
+  const chordRegex = /(\b[A-G][b#]?(?:m|maj|min|aug|dim|sus|add|2|4|5|6|7|9|11|13)*(?:\/[A-G][b#]?)?\b)/g;
+  const parts = text.split(chordRegex);
+  
+  return parts.map((part, i) => {
+    if (part.match(chordRegex)) {
+      return <span key={i} className="text-blue-600 font-bold bg-blue-50 px-1 rounded">{part}</span>;
     }
+    return part;
+  });
+};
 
-    setIsProcessing(true);
-    setProcessingStep('uploading');
-    setUploadProgress(0);
+// --- Main Component ---
+export default function WorshipApp() {
+  const [activeTab, setActiveTab] = useState<'chords' | 'lyrics' | 'setlists' | 'notices'>('chords');
+  const [songs, setSongs] = useState<Song[]>([]);
+  const [setlists, setSetlists] = useState<Setlist[]>([]);
+  const [notices, setNotices] = useState<Notice[]>([]);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [isModalOpen, setIsModalOpen] = useState(false);
+  const [isNoticeModalOpen, setIsNoticeModalOpen] = useState(false);
+  const [isSidebarOpen, setIsSidebarOpen] = useState(false);
+  const [editingSong, setEditingSong] = useState<Song | null>(null);
+  const [editingNotice, setEditingNotice] = useState<Notice | null>(null);
+  const [selectedSong, setSelectedSong] = useState<Song | null>(null);
+  const [selectedSetlist, setSelectedSetlist] = useState<Setlist | null>(null);
+  const [selectedNotice, setSelectedNotice] = useState<Notice | null>(null);
 
-    try {
-      let fileUrl = '';
-      let fileNameOnStorage = '';
+  // Form State - Songs
+  const [formTitle, setFormTitle] = useState('');
+  const [formArtist, setFormArtist] = useState('');
+  const [formContent, setFormContent] = useState('');
+  const [formKey, setFormKey] = useState('C');
+  const [formType, setFormType] = useState<'chord' | 'lyric'>('chord');
 
-      if (newFile) {
-        const fileExt = newFile.name.split('.').pop();
-        fileNameOnStorage = `${user.id}/${Date.now()}.${fileExt}`;
-        
-        // Upload para o Storage
-        const { data: uploadData, error: uploadError } = await supabase.storage
-          .from('transcriptions')
-          .upload(fileNameOnStorage, newFile, {
-            cacheControl: '3600',
-            upsert: false
-          });
+  // Form State - Notices
+  const [noticeTitle, setNoticeTitle] = useState('');
+  const [noticeContent, setNoticeContent] = useState('');
+  const [noticeType, setNoticeType] = useState<'aviso' | 'escala'>('aviso');
 
-        if (uploadError) {
-          if (uploadError.message.includes('maximum allowed size')) {
-            throw new Error('O arquivo excede o limite de 50MB do servidor.');
-          }
-          throw uploadError;
-        }
+  // Load Initial Data
+  useEffect(() => {
+    const savedSongs = localStorage.getItem('worship_songs');
+    const savedSetlists = localStorage.getItem('worship_setlists');
+    const savedNotices = localStorage.getItem('worship_notices');
+    if (savedSongs) setSongs(JSON.parse(savedSongs));
+    if (savedSetlists) setSetlists(JSON.parse(savedSetlists));
+    if (savedNotices) setNotices(JSON.parse(savedNotices));
+  }, []);
 
-        const { data: { publicUrl } } = supabase.storage
-          .from('transcriptions')
-          .getPublicUrl(fileNameOnStorage);
-        fileUrl = publicUrl;
-      }
+  // Save Data
+  useEffect(() => {
+    localStorage.setItem('worship_songs', JSON.stringify(songs));
+    localStorage.setItem('worship_setlists', JSON.stringify(setlists));
+    localStorage.setItem('worship_notices', JSON.stringify(notices));
+  }, [songs, setlists, notices]);
 
-      setProcessingStep('transcribing');
-      
-      // Criar registro inicial no banco
-      const { data: transcriptionData, error: insertError } = await supabase
-        .from('transcriptions')
-        .insert({
-          user_id: user.id,
-          title: newTitle || (newFile ? newFile.name : 'Link Externo'),
-          source: newSource,
-          status: 'processing',
-          include_timestamps: includeTimestamps,
-          file_url: fileUrl,
-          file_name: newFile?.name || '',
-          original_text: 'Processando conteúdo...'
-        })
-        .select()
-        .single();
-
-      if (insertError) throw insertError;
-
-      // Processar com Gemini
-      let transcriptionText = '';
-      const prompt = `Transcreva este conteúdo detalhadamente. Detecte o idioma automaticamente. ${includeTimestamps ? 'Inclua minutagens [00:00].' : 'Não inclua minutagens.'} Retorne apenas o texto da transcrição.`;
-      
-      try {
-        if (newFile) {
-          transcriptionText = await transcribeMedia(newFile, prompt);
-        } else {
-          transcriptionText = await transcribeUrl(newUrl, prompt);
-        }
-      } catch (geminiErr: any) {
-        console.error('Gemini Error:', geminiErr);
-        let userFriendlyError = 'A IA não conseguiu processar este arquivo. Verifique se o formato é suportado.';
-        
-        if (geminiErr.message?.includes('API key not valid')) {
-          userFriendlyError = 'Sua Chave de API do Google (Gemini) é inválida ou não foi configurada corretamente na Vercel.';
-        } else if (geminiErr.message?.includes('quota')) {
-          userFriendlyError = 'Limite de uso da IA atingido. Tente novamente mais tarde.';
-        }
-
-        // Atualizar status para falha no banco
-        await supabase.from('transcriptions').update({ 
-          status: 'failed', 
-          original_text: `Erro: ${userFriendlyError}` 
-        }).eq('id', transcriptionData.id);
-        
-        throw new Error(userFriendlyError);
-      }
-
-      // Atualizar com o resultado final
-      await supabase
-        .from('transcriptions')
-        .update({
-          status: 'completed',
-          original_text: transcriptionText
-        })
-        .eq('id', transcriptionData.id);
-
-      setIsNewModalOpen(false);
-      setNewTitle('');
-      setNewFile(null);
-      setNewUrl('');
-      
-    } catch (err: any) {
-      console.error(err);
-      alert(err.message || 'Erro ao processar transcrição.');
-    } finally {
-      setIsProcessing(false);
-      setProcessingStep('idle');
-    }
-  };
-
-  const handleTranslate = async () => {
-    if (!selectedTranscription || !selectedTranscription.original_text) return;
-
-    setIsTranslating(true);
-    try {
-      const translated = await translateText(selectedTranscription.original_text, targetLang);
-      await supabase
-        .from('transcriptions')
-        .update({
-          translated_text: translated,
-          language: targetLang
-        })
-        .eq('id', selectedTranscription.id);
-      
-      setSelectedTranscription({ ...selectedTranscription, translated_text: translated, language: targetLang });
-    } catch (err) {
-      console.error(err);
-    } finally {
-      setIsTranslating(false);
-    }
-  };
-
-  const handleDelete = async (id: string) => {
-    const confirmed = window.confirm('Deseja realmente excluir esta transcrição?');
-    if (confirmed) {
-      try {
-        // Optimistic update
-        setTranscriptions(prev => prev.filter(t => t.id !== id));
-        if (selectedTranscription?.id === id) setSelectedTranscription(null);
-
-        const { error } = await supabase
-          .from('transcriptions')
-          .delete()
-          .eq('id', id);
-        
-        if (error) throw error;
-      } catch (err) {
-        console.error('Erro ao deletar:', err);
-        alert('Erro ao excluir a transcrição.');
-        // Rollback if needed (could re-fetch, but for simplicity we just alert)
-      }
-    }
-  };
-
-  const filteredTranscriptions = transcriptions.filter(t => 
-    t.title.toLowerCase().includes(searchQuery.toLowerCase())
+  const filteredSongs = songs.filter(s => 
+    s.type === (activeTab === 'chords' ? 'chord' : 'lyric') &&
+    (s.title.toLowerCase().includes(searchQuery.toLowerCase()) || 
+     s.artist.toLowerCase().includes(searchQuery.toLowerCase()))
   );
 
-  if (loading) {
-    return (
-      <div className="h-screen w-full flex items-center justify-center bg-gray-50">
-        <Loader2 className="w-10 h-10 text-blue-600 animate-spin" />
-      </div>
-    );
-  }
+  const handleSaveSong = () => {
+    if (!formTitle || !formContent) return;
 
-  if (configError) {
-    return (
-      <div className="h-screen w-full flex flex-col items-center justify-center bg-[#F8FAFC] p-4 text-center">
-        <div className="p-4 bg-red-50 rounded-2xl border border-red-100 max-w-md">
-          <AlertCircle className="w-12 h-12 text-red-600 mx-auto mb-4" />
-          <h2 className="text-xl font-bold text-gray-900 mb-2">Configuração Necessária</h2>
-          <p className="text-gray-600 mb-6">{configError}</p>
-          <div className="text-left bg-white p-4 rounded-xl text-sm font-mono space-y-2 border border-red-50">
-            <p>1. Vá em <span className="font-bold">Settings</span></p>
-            <p>2. Adicione <span className="font-bold text-blue-600">NEXT_PUBLIC_SUPABASE_URL</span></p>
-            <p>3. Adicione <span className="font-bold text-blue-600">NEXT_PUBLIC_SUPABASE_ANON_KEY</span></p>
+    const newSong: Song = {
+      id: editingSong?.id || Date.now().toString(),
+      title: formTitle,
+      artist: formArtist,
+      content: formContent,
+      type: formType,
+      key: formKey,
+      originalKey: editingSong?.originalKey || formKey
+    };
+
+    if (editingSong) {
+      setSongs(songs.map(s => s.id === editingSong.id ? newSong : s));
+      if (selectedSong?.id === editingSong.id) setSelectedSong(newSong);
+    } else {
+      setSongs([newSong, ...songs]);
+    }
+
+    closeModal();
+  };
+
+  const handleSaveNotice = () => {
+    if (!noticeTitle || !noticeContent) return;
+
+    const newNotice: Notice = {
+      id: editingNotice?.id || Date.now().toString(),
+      title: noticeTitle,
+      content: noticeContent,
+      type: noticeType,
+      date: new Date().toLocaleDateString('pt-BR')
+    };
+
+    if (editingNotice) {
+      setNotices(notices.map(n => n.id === editingNotice.id ? newNotice : n));
+      if (selectedNotice?.id === editingNotice.id) setSelectedNotice(newNotice);
+    } else {
+      setNotices([newNotice, ...notices]);
+    }
+
+    closeNoticeModal();
+  };
+
+  const closeModal = () => {
+    setIsModalOpen(false);
+    setEditingSong(null);
+    setFormTitle('');
+    setFormArtist('');
+    setFormContent('');
+    setFormKey('C');
+  };
+
+  const closeNoticeModal = () => {
+    setIsNoticeModalOpen(false);
+    setEditingNotice(null);
+    setNoticeTitle('');
+    setNoticeContent('');
+  };
+
+  const openEditModal = (song: Song) => {
+    setEditingSong(song);
+    setFormTitle(song.title);
+    setFormArtist(song.artist);
+    setFormContent(song.content);
+    setFormKey(song.key);
+    setFormType(song.type);
+    setIsModalOpen(true);
+  };
+
+  const openNoticeEditModal = (notice: Notice) => {
+    setEditingNotice(notice);
+    setNoticeTitle(notice.title);
+    setNoticeContent(notice.content);
+    setNoticeType(notice.type);
+    setIsNoticeModalOpen(true);
+  };
+
+  const handleDeleteSong = (id: string) => {
+    if (confirm('Deseja excluir esta música?')) {
+      setSongs(songs.filter(s => s.id !== id));
+      if (selectedSong?.id === id) setSelectedSong(null);
+    }
+  };
+
+  const handleDeleteNotice = (id: string) => {
+    if (confirm('Deseja excluir este aviso/escala?')) {
+      setNotices(notices.filter(n => n.id !== id));
+      if (selectedNotice?.id === id) setSelectedNotice(null);
+    }
+  };
+
+  const handleLogout = () => {
+    if (confirm('Deseja sair do sistema?')) {
+      // For now, just clear and reload
+      localStorage.clear();
+      window.location.reload();
+    }
+  };
+
+  const handleTranspose = (semitones: number) => {
+    if (!selectedSong) return;
+    const newContent = transposeContent(selectedSong.content, semitones);
+    const currentIndex = NOTES.indexOf(selectedSong.key);
+    let newIndex = (currentIndex + semitones) % 12;
+    if (newIndex < 0) newIndex += 12;
+    
+    const updatedSong = {
+      ...selectedSong,
+      content: newContent,
+      key: NOTES[newIndex]
+    };
+    
+    setSelectedSong(updatedSong);
+    setSongs(songs.map(s => s.id === selectedSong.id ? updatedSong : s));
+  };
+
+  // Export Functions
+  const exportTXT = (song: Song) => {
+    const blob = new Blob([`${song.title} - ${song.artist}\nTom: ${song.key}\n\n${song.content}`], { type: 'text/plain' });
+    saveAs(blob, `${song.title}.txt`);
+  };
+
+  const exportPDF = (song: Song) => {
+    const doc = new jsPDF();
+    doc.setFontSize(20);
+    doc.text(song.title, 20, 20);
+    doc.setFontSize(12);
+    doc.text(song.artist, 20, 30);
+    doc.text(`Tom: ${song.key}`, 20, 40);
+    doc.setFont('courier');
+    doc.text(song.content, 20, 55);
+    doc.save(`${song.title}.pdf`);
+  };
+
+  const exportWord = async (song: Song) => {
+    const doc = new Document({
+      sections: [{
+        properties: {},
+        children: [
+          new Paragraph({ children: [new TextRun({ text: song.title, bold: true, size: 32 })] }),
+          new Paragraph({ children: [new TextRun({ text: song.artist, size: 24 })] }),
+          new Paragraph({ children: [new TextRun({ text: `Tom: ${song.key}`, size: 20 })] }),
+          new Paragraph({ children: [new TextRun({ text: "" })] }),
+          ...song.content.split('\n').map(line => new Paragraph({ children: [new TextRun({ text: line, font: 'Courier New' })] }))
+        ],
+      }],
+    });
+    const blob = await Packer.toBlob(doc);
+    saveAs(blob, `${song.title}.docx`);
+  };
+
+  const shareWhatsApp = (song: Song) => {
+    const text = `*${song.title} - ${song.artist}*\nTom: ${song.key}\n\n${song.content}`;
+    window.open(`https://wa.me/?text=${encodeURIComponent(text)}`, '_blank');
+  };
+
+  const shareNoticeWhatsApp = (notice: Notice) => {
+    const text = `*${notice.title}*\nData: ${notice.date}\n\n${notice.content}`;
+    window.open(`https://wa.me/?text=${encodeURIComponent(text)}`, '_blank');
+  };
+
+  const exportNoticeTXT = (notice: Notice) => {
+    const blob = new Blob([`${notice.title}\nData: ${notice.date}\n\n${notice.content}`], { type: 'text/plain' });
+    saveAs(blob, `${notice.title}.txt`);
+  };
+
+  const handleImportTXT = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      const content = event.target?.result as string;
+      setFormContent(content);
+      setFormTitle(file.name.replace('.txt', ''));
+      setFormType(activeTab === 'chords' ? 'chord' : 'lyric');
+      setIsModalOpen(true);
+    };
+    reader.readAsText(file);
+  };
+
+  // Setlist Functions
+  const handleCreateSetlist = () => {
+    const name = prompt('Nome do Setlist:');
+    if (!name) return;
+    const newSetlist: Setlist = {
+      id: Date.now().toString(),
+      name,
+      date: new Date().toLocaleDateString('pt-BR'),
+      songs: []
+    };
+    setSetlists([newSetlist, ...setlists]);
+  };
+
+  const addToSetlist = (songId: string, setlistId: string) => {
+    setSetlists(setlists.map(sl => {
+      if (sl.id === setlistId && !sl.songs.includes(songId)) {
+        return { ...sl, songs: [...sl.songs, songId] };
+      }
+      return sl;
+    }));
+  };
+
+  const removeFromSetlist = (songId: string, setlistId: string) => {
+    setSetlists(setlists.map(sl => {
+      if (sl.id === setlistId) {
+        return { ...sl, songs: sl.songs.filter(id => id !== songId) };
+      }
+      return sl;
+    }));
+  };
+
+  return (
+    <div className="min-h-screen bg-gray-50 font-sans text-gray-900 flex flex-col lg:flex-row h-screen overflow-hidden">
+      {/* Mobile Sidebar Overlay */}
+      <AnimatePresence>
+        {isSidebarOpen && (
+          <motion.div 
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            onClick={() => setIsSidebarOpen(false)}
+            className="fixed inset-0 bg-black/50 z-40 lg:hidden"
+          />
+        )}
+      </AnimatePresence>
+
+      {/* Sidebar */}
+      <aside className={cn(
+        "fixed inset-y-0 left-0 z-50 w-64 bg-white border-r border-gray-200 flex flex-col transition-transform duration-300 lg:relative lg:translate-x-0 shrink-0",
+        isSidebarOpen ? "translate-x-0" : "-translate-x-full"
+      )}>
+        <div className="p-6 flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 bg-blue-600 rounded-xl flex items-center justify-center text-white shadow-lg shadow-blue-200">
+              <Music className="w-6 h-6" />
+            </div>
+            <h1 className="font-black text-xl tracking-tight">WorshipApp</h1>
+          </div>
+          <button onClick={() => setIsSidebarOpen(false)} className="lg:hidden p-2 hover:bg-gray-100 rounded-xl">
+            <X className="w-6 h-6 text-gray-400" />
+          </button>
+        </div>
+
+        <nav className="flex-1 px-4 space-y-2 mt-4 overflow-y-auto">
+          {[
+            { id: 'chords', icon: Music, label: 'Cifras' },
+            { id: 'lyrics', icon: FileText, label: 'Letras' },
+            { id: 'setlists', icon: ListMusic, label: 'Setlists' },
+            { id: 'notices', icon: Bell, label: 'Avisos & Escala' }
+          ].map(item => (
+            <button
+              key={item.id}
+              onClick={() => { 
+                setActiveTab(item.id as any); 
+                setSelectedSong(null); 
+                setSelectedSetlist(null); 
+                setSelectedNotice(null);
+                setIsSidebarOpen(false);
+              }}
+              className={cn(
+                'w-full flex items-center gap-3 p-3 rounded-xl transition-all group',
+                activeTab === item.id ? 'bg-blue-50 text-blue-600' : 'text-gray-400 hover:bg-gray-50 hover:text-gray-600'
+              )}
+            >
+              <item.icon className={cn('w-6 h-6', activeTab === item.id ? 'text-blue-600' : 'text-gray-400 group-hover:text-gray-600')} />
+              <span className="font-bold">{item.label}</span>
+            </button>
+          ))}
+        </nav>
+
+        <div className="p-4 border-t border-gray-100">
+          <button 
+            onClick={handleLogout}
+            className="w-full flex items-center gap-3 p-3 rounded-xl text-red-400 hover:bg-red-50 hover:text-red-600 transition-all"
+          >
+            <LogOut className="w-6 h-6" />
+            <span className="font-bold">Sair</span>
+          </button>
+        </div>
+      </aside>
+
+      {/* Main Area */}
+      <main className="flex-1 flex flex-col min-w-0 bg-gray-50 h-full">
+        {/* Header */}
+        <header className="h-20 bg-white border-b border-gray-200 px-4 lg:px-8 flex items-center justify-between shrink-0">
+          <div className="flex items-center gap-4 flex-1 max-w-xl">
+            <button onClick={() => setIsSidebarOpen(true)} className="lg:hidden p-2 hover:bg-gray-100 rounded-xl">
+              <Menu className="w-6 h-6 text-gray-400" />
+            </button>
+            <div className="relative flex-1">
+              <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
+              <input 
+                type="text" 
+                placeholder={`Buscar...`}
+                className="w-full pl-10 pr-4 py-2 bg-gray-100 border-none rounded-xl focus:ring-2 focus:ring-blue-100 transition-all text-sm"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+              />
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2 lg:gap-3 ml-4">
+            {activeTab !== 'setlists' && activeTab !== 'notices' && (
+              <label className="cursor-pointer bg-white border border-gray-200 p-2 rounded-xl hover:bg-gray-50 transition-all shadow-sm">
+                <Upload className="w-5 h-5 text-gray-600" />
+                <input type="file" accept=".txt" className="hidden" onChange={handleImportTXT} />
+              </label>
+            )}
+            <button 
+              onClick={() => {
+                if (activeTab === 'setlists') handleCreateSetlist();
+                else if (activeTab === 'notices') setIsNoticeModalOpen(true);
+                else setIsModalOpen(true);
+              }}
+              className="bg-blue-600 text-white px-3 lg:px-4 py-2 rounded-xl font-bold flex items-center gap-2 hover:bg-blue-700 transition-all shadow-lg shadow-blue-200"
+            >
+              <Plus className="w-5 h-5" />
+              <span className="hidden sm:inline">Novo</span>
+            </button>
+          </div>
+        </header>
+
+        {/* Content */}
+        <div className="flex-1 overflow-hidden flex flex-col lg:flex-row">
+          {/* List */}
+          <div className={cn(
+            "w-full lg:w-80 border-r border-gray-200 overflow-y-auto bg-white/50 h-full",
+            (selectedSong || selectedSetlist || selectedNotice) ? "hidden lg:block" : "block"
+          )}>
+            {activeTab === 'setlists' ? (
+              <div className="p-4 space-y-3">
+                {setlists.map(sl => (
+                  <button
+                    key={sl.id}
+                    onClick={() => setSelectedSetlist(sl)}
+                    className={cn(
+                      'w-full p-4 rounded-2xl border transition-all text-left group',
+                      selectedSetlist?.id === sl.id ? 'border-blue-200 bg-blue-50' : 'border-transparent bg-white hover:border-gray-200'
+                    )}
+                  >
+                    <p className="font-bold text-gray-900">{sl.name}</p>
+                    <p className="text-xs text-gray-400 mt-1">{sl.date} • {sl.songs.length} músicas</p>
+                  </button>
+                ))}
+              </div>
+            ) : activeTab === 'notices' ? (
+              <div className="p-4 space-y-3">
+                {notices.map(notice => (
+                  <button
+                    key={notice.id}
+                    onClick={() => setSelectedNotice(notice)}
+                    className={cn(
+                      'w-full p-4 rounded-2xl border transition-all text-left group',
+                      selectedNotice?.id === notice.id ? 'border-blue-200 bg-blue-50' : 'border-transparent bg-white hover:border-gray-200'
+                    )}
+                  >
+                    <div className="flex justify-between items-start">
+                      <div>
+                        <p className="font-bold text-gray-900">{notice.title}</p>
+                        <p className="text-xs text-gray-400">{notice.date}</p>
+                      </div>
+                      <span className={cn(
+                        "text-[10px] font-black px-2 py-1 rounded-lg uppercase tracking-wider",
+                        notice.type === 'aviso' ? "bg-amber-100 text-amber-600" : "bg-purple-100 text-purple-600"
+                      )}>
+                        {notice.type}
+                      </span>
+                    </div>
+                  </button>
+                ))}
+              </div>
+            ) : (
+              <div className="p-4 space-y-3">
+                {filteredSongs.map(song => (
+                  <button
+                    key={song.id}
+                    onClick={() => setSelectedSong(song)}
+                    className={cn(
+                      'w-full p-4 rounded-2xl border transition-all text-left group',
+                      selectedSong?.id === song.id ? 'border-blue-200 bg-blue-50' : 'border-transparent bg-white hover:border-gray-200'
+                    )}
+                  >
+                    <div className="flex justify-between items-start">
+                      <div>
+                        <p className="font-bold text-gray-900">{song.title}</p>
+                        <p className="text-xs text-gray-400">{song.artist}</p>
+                      </div>
+                      {song.type === 'chord' && (
+                        <span className="text-[10px] font-black bg-blue-100 text-blue-600 px-2 py-1 rounded-lg uppercase tracking-wider">
+                          {song.key}
+                        </span>
+                      )}
+                    </div>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Viewer */}
+          <div className={cn(
+            "flex-1 overflow-y-auto p-4 lg:p-8 bg-white h-full",
+            (!selectedSong && !selectedSetlist && !selectedNotice) ? "hidden lg:flex" : "flex"
+          )}>
+            {selectedSong ? (
+              <div className="w-full max-w-3xl mx-auto space-y-8">
+                <div className="flex items-center justify-between border-b border-gray-100 pb-6">
+                  <div className="flex items-center gap-4">
+                    <button onClick={() => setSelectedSong(null)} className="lg:hidden p-2 hover:bg-gray-100 rounded-xl">
+                      <ChevronLeft className="w-6 h-6 text-gray-400" />
+                    </button>
+                    <div>
+                      <h2 className="text-2xl lg:text-3xl font-black text-gray-900">{selectedSong.title}</h2>
+                      <p className="text-gray-400 font-medium">{selectedSong.artist}</p>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button onClick={() => openEditModal(selectedSong)} className="p-2 hover:bg-gray-100 rounded-xl text-gray-400 hover:text-gray-600"><Edit3 className="w-5 h-5" /></button>
+                    <button onClick={() => handleDeleteSong(selectedSong.id)} className="p-2 hover:bg-red-50 rounded-xl text-gray-400 hover:text-red-600"><Trash2 className="w-5 h-5" /></button>
+                  </div>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-4 py-4 bg-gray-50 px-4 lg:px-6 rounded-2xl">
+                  {selectedSong.type === 'chord' && (
+                    <div className="flex items-center gap-3 border-r border-gray-200 pr-4">
+                      <span className="text-xs font-bold text-gray-400 uppercase tracking-widest">Tom</span>
+                      <div className="flex items-center gap-2">
+                        <button onClick={() => handleTranspose(-1)} className="p-1.5 bg-white border border-gray-200 rounded-lg hover:bg-gray-100"><ChevronLeft className="w-4 h-4" /></button>
+                        <span className="w-8 text-center font-black text-blue-600">{selectedSong.key}</span>
+                        <button onClick={() => handleTranspose(1)} className="p-1.5 bg-white border border-gray-200 rounded-lg hover:bg-gray-100"><ChevronRight className="w-4 h-4" /></button>
+                      </div>
+                    </div>
+                  )}
+                  <div className="flex items-center gap-2">
+                    <button onClick={() => exportTXT(selectedSong)} className="p-2 hover:bg-white rounded-lg text-gray-500" title="TXT"><FileDown className="w-5 h-5" /></button>
+                    <button onClick={() => exportPDF(selectedSong)} className="p-2 hover:bg-white rounded-lg text-gray-500" title="PDF"><Printer className="w-5 h-5" /></button>
+                    <button onClick={() => exportWord(selectedSong)} className="p-2 hover:bg-white rounded-lg text-gray-500" title="Word"><Save className="w-5 h-5" /></button>
+                    <button onClick={() => shareWhatsApp(selectedSong)} className="p-2 hover:bg-white rounded-lg text-green-600" title="WhatsApp"><MessageCircle className="w-5 h-5" /></button>
+                  </div>
+                  <div className="flex-1" />
+                  <div className="relative group">
+                    <button className="bg-white border border-gray-200 px-4 py-2 rounded-xl text-xs font-bold flex items-center gap-2">
+                      <Plus className="w-4 h-4" /> Add ao Setlist
+                    </button>
+                    <div className="absolute right-0 top-full mt-2 w-48 bg-white border border-gray-200 rounded-xl shadow-xl opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-10 p-2">
+                      {setlists.map(sl => (
+                        <button 
+                          key={sl.id}
+                          onClick={() => addToSetlist(selectedSong.id, sl.id)}
+                          className="w-full text-left p-2 hover:bg-blue-50 rounded-lg text-xs font-medium"
+                        >
+                          {sl.name}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+
+                <div className="bg-gray-50 p-4 lg:p-8 rounded-3xl font-mono text-sm leading-relaxed overflow-x-auto whitespace-pre">
+                  {selectedSong.type === 'chord' ? highlightChords(selectedSong.content) : selectedSong.content}
+                </div>
+              </div>
+            ) : selectedSetlist ? (
+              <div className="w-full max-w-3xl mx-auto space-y-8">
+                <div className="flex items-center justify-between border-b border-gray-100 pb-6">
+                  <div className="flex items-center gap-4">
+                    <button onClick={() => setSelectedSetlist(null)} className="lg:hidden p-2 hover:bg-gray-100 rounded-xl">
+                      <ChevronLeft className="w-6 h-6 text-gray-400" />
+                    </button>
+                    <div>
+                      <h2 className="text-2xl lg:text-3xl font-black text-gray-900">{selectedSetlist.name}</h2>
+                      <p className="text-gray-400 font-medium">{selectedSetlist.date}</p>
+                    </div>
+                  </div>
+                  <button 
+                    onClick={() => {
+                      const text = `*Setlist: ${selectedSetlist.name}*\nData: ${selectedSetlist.date}\n\n` + 
+                        selectedSetlist.songs.map((id, i) => {
+                          const s = songs.find(x => x.id === id);
+                          return `${i+1}. ${s?.title} (${s?.key})`;
+                        }).join('\n');
+                      window.open(`https://wa.me/?text=${encodeURIComponent(text)}`, '_blank');
+                    }}
+                    className="bg-green-600 text-white px-4 py-2 rounded-xl font-bold flex items-center gap-2 hover:bg-green-700 transition-all"
+                  >
+                    <MessageCircle className="w-5 h-5" /> Compartilhar
+                  </button>
+                </div>
+
+                <div className="space-y-4">
+                  {selectedSetlist.songs.map((songId, index) => {
+                    const song = songs.find(s => s.id === songId);
+                    if (!song) return null;
+                    return (
+                      <div key={songId} className="flex items-center gap-4 p-4 bg-gray-50 rounded-2xl group">
+                        <span className="w-8 h-8 bg-white rounded-lg flex items-center justify-center font-black text-blue-600 shadow-sm">{index + 1}</span>
+                        <div className="flex-1">
+                          <p className="font-bold text-gray-900">{song.title}</p>
+                          <p className="text-xs text-gray-400">{song.artist} • {song.key}</p>
+                        </div>
+                        <button onClick={() => setSelectedSong(song)} className="p-2 hover:bg-white rounded-lg text-gray-400 hover:text-blue-600"><ChevronRight className="w-5 h-5" /></button>
+                        <button onClick={() => removeFromSetlist(songId, selectedSetlist.id)} className="p-2 hover:bg-white rounded-lg text-gray-400 hover:text-red-600 opacity-0 group-hover:opacity-100 transition-all"><X className="w-5 h-5" /></button>
+                      </div>
+                    );
+                  })}
+                  {selectedSetlist.songs.length === 0 && (
+                    <div className="text-center py-12 border-2 border-dashed border-gray-100 rounded-3xl">
+                      <ListMusic className="w-12 h-12 text-gray-200 mx-auto mb-4" />
+                      <p className="text-gray-400">Adicione músicas a este setlist</p>
+                    </div>
+                  )}
+                </div>
+              </div>
+            ) : selectedNotice ? (
+              <div className="w-full max-w-3xl mx-auto space-y-8">
+                <div className="flex items-center justify-between border-b border-gray-100 pb-6">
+                  <div className="flex items-center gap-4">
+                    <button onClick={() => setSelectedNotice(null)} className="lg:hidden p-2 hover:bg-gray-100 rounded-xl">
+                      <ChevronLeft className="w-6 h-6 text-gray-400" />
+                    </button>
+                    <div>
+                      <h2 className="text-2xl lg:text-3xl font-black text-gray-900">{selectedNotice.title}</h2>
+                      <p className="text-gray-400 font-medium">{selectedNotice.date}</p>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button onClick={() => openNoticeEditModal(selectedNotice)} className="p-2 hover:bg-gray-100 rounded-xl text-gray-400 hover:text-gray-600"><Edit3 className="w-5 h-5" /></button>
+                    <button onClick={() => handleDeleteNotice(selectedNotice.id)} className="p-2 hover:bg-red-50 rounded-xl text-gray-400 hover:text-red-600"><Trash2 className="w-5 h-5" /></button>
+                  </div>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-4 py-4 bg-gray-50 px-4 lg:px-6 rounded-2xl">
+                  <div className="flex items-center gap-2">
+                    <button onClick={() => exportNoticeTXT(selectedNotice)} className="p-2 hover:bg-white rounded-lg text-gray-500" title="TXT"><FileDown className="w-5 h-5" /></button>
+                    <button onClick={() => shareNoticeWhatsApp(selectedNotice)} className="p-2 hover:bg-white rounded-lg text-green-600" title="WhatsApp"><MessageCircle className="w-5 h-5" /></button>
+                  </div>
+                </div>
+
+                <div className="bg-gray-50 p-4 lg:p-8 rounded-3xl font-sans text-sm lg:text-base leading-relaxed overflow-x-auto whitespace-pre-wrap">
+                  {selectedNotice.content}
+                </div>
+              </div>
+            ) : (
+              <div className="h-full w-full flex flex-col items-center justify-center text-center space-y-4">
+                <div className="w-20 h-20 bg-gray-50 rounded-3xl flex items-center justify-center text-gray-200">
+                  <Music className="w-10 h-10" />
+                </div>
+                <div>
+                  <h3 className="text-xl font-bold text-gray-900">Selecione um item</h3>
+                  <p className="text-gray-400">Escolha uma música, setlist ou aviso para visualizar</p>
+                </div>
+              </div>
+            )}
           </div>
         </div>
-      </div>
-    );
-  }
+      </main>
 
-  if (!user) {
-    return (
-      <div className="h-screen w-full flex flex-col items-center justify-center bg-[#F8FAFC] p-4">
-        <motion.div 
-          initial={{ opacity: 0, y: 20 }}
-          animate={{ opacity: 1, y: 0 }}
-          className="max-w-md w-full text-center space-y-8"
-        >
-          <div className="inline-flex p-4 bg-blue-600 rounded-3xl shadow-2xl shadow-blue-200">
-            <Mic className="w-12 h-12 text-white" />
-          </div>
-          <div className="space-y-2">
-            <h1 className="text-4xl font-black tracking-tight text-gray-900">TranscreveAI</h1>
-            <p className="text-gray-500 text-lg">A plataforma definitiva para transcrição e tradução inteligente de mídia.</p>
-          </div>
-          <Card className="p-8 space-y-6">
-            <form onSubmit={handleEmailAuth} className="space-y-4 text-left">
-              <div className="space-y-2">
-                <label className="text-sm font-medium text-gray-700">E-mail</label>
-                <input 
-                  type="email" 
-                  value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                  placeholder="seu@email.com"
-                  className="w-full px-4 py-2 rounded-xl border border-gray-200 focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all"
-                  required
-                />
-              </div>
-              <div className="space-y-2">
-                <label className="text-sm font-medium text-gray-700">Senha</label>
-                <input 
-                  type="password" 
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  placeholder="••••••••"
-                  className="w-full px-4 py-2 rounded-xl border border-gray-200 focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all"
-                  required
-                />
-              </div>
-              <Button 
-                className="w-full py-3" 
-                loading={authLoading}
-              >
-                {isSignUp ? 'Criar Conta' : 'Entrar'}
-              </Button>
-            </form>
-
-            <div className="relative">
-              <div className="absolute inset-0 flex items-center"><span className="w-full border-t" /></div>
-              <div className="relative flex justify-center text-xs uppercase">
-                <span className="bg-white px-2 text-gray-500">Ou continue com</span>
-              </div>
-            </div>
-
-            <Button 
-              onClick={handleLogin} 
-              variant="outline" 
-              className="w-full py-3"
-              disabled={authLoading}
-            >
-              <svg className="w-5 h-5 mr-2" viewBox="0 0 24 24">
-                <path fill="currentColor" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" />
-                <path fill="currentColor" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" />
-                <path fill="currentColor" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l3.66-2.84z" />
-                <path fill="currentColor" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" />
-              </svg>
-              Google
-            </Button>
-
-            <p className="text-center text-sm text-gray-500">
-              {isSignUp ? 'Já tem uma conta?' : 'Não tem uma conta?'}
-              <button 
-                onClick={() => setIsSignUp(!isSignUp)}
-                className="ml-1 text-blue-600 font-bold hover:underline"
-              >
-                {isSignUp ? 'Entrar' : 'Cadastrar-se'}
-              </button>
-            </p>
-          </Card>
-        </motion.div>
-      </div>
-    );
-  }
-
-  return (
-    <ErrorBoundary>
-      <div className="h-[100dvh] flex bg-[#F8FAFC] overflow-hidden font-sans relative">
-        {/* --- Mobile Overlay --- */}
-        <AnimatePresence>
-          {isSidebarOpen && isMobile && (
+      {/* Song Modal */}
+      <AnimatePresence>
+        {isModalOpen && (
+          <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
             <motion.div 
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}
-              onClick={() => setIsSidebarOpen(false)}
-              className="fixed inset-0 bg-black/40 backdrop-blur-sm z-30 lg:hidden"
+              onClick={closeModal}
+              className="absolute inset-0 bg-gray-900/40 backdrop-blur-sm"
             />
-          )}
-        </AnimatePresence>
-
-        {/* --- Sidebar --- */}
-        <AnimatePresence mode="wait">
-          {(isSidebarOpen || !isMobile) && (
-            <motion.aside 
-              initial={isMobile ? { x: -320, opacity: 0 } : undefined}
-              animate={{ x: 0, opacity: 1 }}
-              exit={isMobile ? { x: -320, opacity: 0 } : undefined}
-              transition={{ type: 'spring', damping: 25, stiffness: 200 }}
-              className={cn(
-                "bg-white border-r border-gray-100 flex flex-col fixed inset-y-0 left-0 z-40 w-[280px] sm:w-[320px] lg:relative lg:z-20",
-                !isSidebarOpen && isMobile && "hidden"
-              )}
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.95, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 20 }}
+              className="bg-white w-full max-w-2xl rounded-3xl shadow-2xl relative z-10 overflow-hidden flex flex-col max-h-[90vh]"
             >
-              <div className="p-6 flex items-center justify-between border-b border-gray-50">
-                <div className="flex items-center gap-2">
-                  <div className="p-1.5 bg-blue-600 rounded-lg">
-                    <Mic className="w-5 h-5 text-white" />
-                  </div>
-                  <span className="font-bold text-xl tracking-tight">TranscreveAI</span>
-                </div>
-                <button onClick={() => setIsSidebarOpen(false)} className="lg:hidden p-2 hover:bg-gray-100 rounded-lg">
-                  <X className="w-5 h-5 text-gray-400" />
-                </button>
-              </div>
-
-              <div className="p-4 space-y-4 flex-1 overflow-y-auto">
-                <Button onClick={() => { setIsNewModalOpen(true); setIsSidebarOpen(false); }} className="w-full py-3">
-                  <Plus className="w-4 h-4" /> Nova Transcrição
-                </Button>
-
-                <div className="relative">
-                  <Search className="w-4 h-4 absolute left-3 top-3 text-gray-400" />
-                  <input 
-                    type="text" 
-                    placeholder="Buscar..." 
-                    className="w-full pl-10 pr-4 py-2.5 bg-gray-50 border-none rounded-xl text-sm focus:ring-2 focus:ring-blue-100 transition-all"
-                    value={searchQuery}
-                    onChange={(e) => setSearchQuery(e.target.value)}
-                  />
+              <div className="p-6 lg:p-8 space-y-6 overflow-y-auto">
+                <div className="flex items-center justify-between">
+                  <h3 className="text-2xl font-black text-gray-900">{editingSong ? 'Editar Música' : 'Nova Música'}</h3>
+                  <button onClick={closeModal} className="p-2 hover:bg-gray-100 rounded-xl"><X className="w-6 h-6 text-gray-400" /></button>
                 </div>
 
-                <div className="space-y-1">
-                  <p className="text-[10px] font-bold text-gray-400 uppercase tracking-widest px-2 mb-2">Recentes</p>
-                      {filteredTranscriptions.map((t) => (
-                        <div key={t.id} className="relative group">
-                          <button
-                            onClick={() => { setSelectedTranscription(t); setIsSidebarOpen(false); }}
-                            className={cn(
-                              'w-full p-3 rounded-xl flex items-center gap-3 transition-all text-left',
-                              selectedTranscription?.id === t.id ? 'bg-blue-50 text-blue-700' : 'hover:bg-gray-50 text-gray-600'
-                            )}
-                          >
-                            <div className={cn(
-                              'p-2 rounded-lg',
-                              selectedTranscription?.id === t.id ? 'bg-blue-100' : 'bg-gray-100 group-hover:bg-white'
-                            )}>
-                              {t.source === 'upload' ? <Upload className="w-4 h-4" /> : 
-                               t.source === 'youtube' ? <Youtube className="w-4 h-4" /> :
-                               t.source === 'instagram' ? <Instagram className="w-4 h-4" /> : <HardDrive className="w-4 h-4" />}
-                            </div>
-                            <div className="flex-1 min-w-0">
-                              <p className="text-sm font-semibold truncate">{t.title}</p>
-                              <p className="text-[10px] opacity-60">
-                                {new Date(t.created_at).toLocaleDateString('pt-BR')}
-                              </p>
-                            </div>
-                            {t.status === 'processing' && <Loader2 className="w-3 h-3 animate-spin text-blue-400" />}
-                          </button>
-                          <button 
-                            onClick={(e) => { e.stopPropagation(); handleDelete(t.id); }}
-                            className="absolute right-2 top-1/2 -translate-y-1/2 p-2 opacity-0 group-hover:opacity-100 hover:bg-red-50 hover:text-red-600 rounded-lg transition-all text-gray-400"
-                            title="Excluir"
-                          >
-                            <Trash2 className="w-3.5 h-3.5" />
-                          </button>
-                        </div>
-                      ))}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  <div className="space-y-1.5">
+                    <label className="text-[10px] font-black text-gray-400 uppercase tracking-widest">Título</label>
+                    <input 
+                      type="text" 
+                      className="w-full px-4 py-3 bg-gray-50 border-none rounded-xl focus:ring-2 focus:ring-blue-100 transition-all"
+                      value={formTitle}
+                      onChange={(e) => setFormTitle(e.target.value)}
+                    />
+                  </div>
+                  <div className="space-y-1.5">
+                    <label className="text-[10px] font-black text-gray-400 uppercase tracking-widest">Artista</label>
+                    <input 
+                      type="text" 
+                      className="w-full px-4 py-3 bg-gray-50 border-none rounded-xl focus:ring-2 focus:ring-blue-100 transition-all"
+                      value={formArtist}
+                      onChange={(e) => setFormArtist(e.target.value)}
+                    />
+                  </div>
                 </div>
-              </div>
 
-              <div className="p-4 border-t border-gray-50 bg-gray-50/50">
-                <div className="flex items-center gap-3 p-2">
-                  <div className="w-10 h-10 rounded-full bg-blue-100 flex items-center justify-center text-blue-600 font-bold shadow-sm">
-                    {user.email?.[0].toUpperCase()}
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <p className="text-sm font-bold truncate">{user.user_metadata?.full_name || user.email?.split('@')[0]}</p>
-                    <p className="text-[10px] text-gray-400 truncate">{user.email}</p>
-                  </div>
-                  <button onClick={handleLogout} className="p-2 hover:bg-red-50 hover:text-red-600 rounded-lg transition-colors">
-                    <LogOut className="w-4 h-4" />
-                  </button>
-                </div>
-              </div>
-            </motion.aside>
-          )}
-        </AnimatePresence>
-
-        {/* --- Main Content --- */}
-        <main className="flex-1 flex flex-col min-w-0 relative h-full">
-          {/* Header */}
-          <header className="h-20 bg-white border-b border-gray-100 px-4 sm:px-8 flex items-center justify-between shrink-0">
-            <div className="flex items-center gap-4 min-w-0">
-              <button onClick={() => setIsSidebarOpen(true)} className="lg:hidden p-2 hover:bg-gray-100 rounded-lg">
-                <Menu className="w-5 h-5 text-gray-400" />
-              </button>
-              <h2 className="text-lg sm:text-xl font-bold text-gray-900 truncate">
-                {selectedTranscription ? selectedTranscription.title : 'Painel de Controle'}
-              </h2>
-            </div>
-
-            {selectedTranscription && (
-              <div className="flex items-center gap-1 sm:gap-2">
-                {selectedTranscription.status === 'completed' && (
-                  <>
-                    <div className="hidden sm:flex items-center gap-2">
-                      <Button variant="outline" onClick={() => exportToPDF(selectedTranscription.title, selectedTranscription.translated_text || selectedTranscription.original_text)}>
-                        <Download className="w-4 h-4" /> PDF
-                      </Button>
-                      <Button variant="outline" onClick={() => exportToWord(selectedTranscription.title, selectedTranscription.translated_text || selectedTranscription.original_text)}>
-                        <Download className="w-4 h-4" /> Word
-                      </Button>
-                    </div>
-                    <div className="sm:hidden">
-                      <Button variant="outline" className="p-2" onClick={() => exportToPDF(selectedTranscription.title, selectedTranscription.translated_text || selectedTranscription.original_text)}>
-                        <Download className="w-4 h-4" />
-                      </Button>
-                    </div>
-                  </>
-                )}
-                <Button variant="danger" className="p-2 sm:px-4" onClick={() => handleDelete(selectedTranscription.id)}>
-                  <Trash2 className="w-4 h-4" />
-                </Button>
-              </div>
-            )}
-          </header>
-
-          {/* Content Area */}
-          <div className="flex-1 overflow-y-auto p-4 sm:p-8">
-            <AnimatePresence mode="wait">
-              {selectedTranscription ? (
-                <motion.div 
-                  key={selectedTranscription.id}
-                  initial={{ opacity: 0, y: 10 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  className="max-w-5xl mx-auto space-y-6 sm:space-y-8"
-                >
-                  {/* Status & Info */}
-                  <div className="flex flex-wrap items-center gap-3 sm:gap-4">
-                    <Badge variant={selectedTranscription.status === 'completed' ? 'success' : 'warning'}>
-                      {selectedTranscription.status === 'completed' ? 'Concluído' : 'Processando'}
-                    </Badge>
-                    <div className="flex items-center gap-2 text-[10px] sm:text-xs text-gray-400">
-                      <History className="w-3 h-3" />
-                      {new Date(selectedTranscription.created_at).toLocaleString('pt-BR')}
-                    </div>
-                    <div className="flex items-center gap-2 text-[10px] sm:text-xs text-gray-400">
-                      <Clock className="w-3 h-3" />
-                      {selectedTranscription.include_timestamps ? 'Com minutagem' : 'Sem minutagem'}
-                    </div>
-                  </div>
-
-                  {/* Transcription Body */}
-                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 sm:gap-8">
-                    {/* Original */}
-                    <Card className="flex flex-col h-[400px] sm:h-[600px]">
-                      <div className="p-4 bg-gray-50 border-b border-gray-100 flex items-center justify-between">
-                        <span className="text-xs font-bold uppercase tracking-wider text-gray-500">Texto Original</span>
-                        <Globe className="w-4 h-4 text-gray-300" />
-                      </div>
-                      <div className="flex-1 p-4 sm:p-6 overflow-y-auto whitespace-pre-wrap text-gray-700 leading-relaxed text-sm">
-                        {selectedTranscription.status === 'processing' ? (
-                          <div className="h-full flex flex-col items-center justify-center text-gray-400 space-y-4">
-                            <Loader2 className="w-8 h-8 animate-spin" />
-                            <p className="text-center">Analisando mídia e gerando transcrição...</p>
-                          </div>
-                        ) : (
-                          selectedTranscription.original_text || 'Nenhum texto gerado.'
-                        )}
-                      </div>
-                    </Card>
-
-                    {/* Translation */}
-                    <Card className="flex flex-col h-[400px] sm:h-[600px]">
-                      <div className="p-4 bg-gray-50 border-b border-gray-100 flex items-center justify-between">
-                        <div className="flex items-center gap-2">
-                          <span className="text-xs font-bold uppercase tracking-wider text-gray-500">Tradução</span>
-                          {selectedTranscription.language && (
-                            <Badge variant="info">{selectedTranscription.language}</Badge>
-                          )}
-                        </div>
-                        <div className="flex items-center gap-2">
-                          <select 
-                            className="text-[10px] sm:text-xs bg-white border border-gray-200 rounded px-1 sm:px-2 py-1 outline-none"
-                            value={targetLang}
-                            onChange={(e) => setTargetLang(e.target.value)}
-                          >
-                            <option>Inglês</option>
-                            <option>Espanhol</option>
-                            <option>Francês</option>
-                            <option>Alemão</option>
-                            <option>Italiano</option>
-                            <option>Japonês</option>
-                            <option>Chinês</option>
-                          </select>
-                          <Button 
-                            variant="ghost" 
-                            className="p-1 sm:p-1.5" 
-                            onClick={handleTranslate}
-                            loading={isTranslating}
-                            disabled={selectedTranscription.status !== 'completed'}
-                          >
-                            <Languages className="w-4 h-4" />
-                          </Button>
-                        </div>
-                      </div>
-                      <div className="flex-1 p-4 sm:p-6 overflow-y-auto whitespace-pre-wrap text-gray-700 leading-relaxed text-sm bg-blue-50/10">
-                        {isTranslating ? (
-                          <div className="h-full flex flex-col items-center justify-center text-gray-400 space-y-4">
-                            <Loader2 className="w-8 h-8 animate-spin text-blue-400" />
-                            <p className="text-center">Traduzindo conteúdo...</p>
-                          </div>
-                        ) : (
-                          selectedTranscription.translated_text || (
-                            <div className="h-full flex flex-col items-center justify-center text-gray-300 italic text-center px-4 sm:px-8">
-                              <Languages className="w-10 h-10 sm:w-12 sm:h-12 mb-4 opacity-20" />
-                              <p className="text-xs sm:text-sm">Selecione um idioma e clique no ícone de tradução para converter o texto.</p>
-                            </div>
-                          )
-                        )}
-                      </div>
-                    </Card>
-                  </div>
-                </motion.div>
-              ) : (
-                <motion.div 
-                  initial={{ opacity: 0, y: 10 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  className="max-w-5xl mx-auto space-y-8"
-                >
-                  {/* Dashboard / CRM View */}
-                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                    <Card className="p-6 bg-gradient-to-br from-blue-600 to-blue-700 text-white">
-                      <div className="flex items-center justify-between mb-4">
-                        <div className="p-2 bg-white/20 rounded-lg"><FileText className="w-5 h-5" /></div>
-                        <span className="text-xs font-bold uppercase opacity-80">Total</span>
-                      </div>
-                      <p className="text-3xl font-black">{transcriptions.length}</p>
-                      <p className="text-xs opacity-80 mt-1">Transcritos realizados</p>
-                    </Card>
-                    <Card className="p-6">
-                      <div className="flex items-center justify-between mb-4">
-                        <div className="p-2 bg-green-50 rounded-lg"><CheckCircle2 className="w-5 h-5 text-green-600" /></div>
-                        <span className="text-xs font-bold uppercase text-gray-400">Concluídos</span>
-                      </div>
-                      <p className="text-3xl font-black text-gray-900">{transcriptions.filter(t => t.status === 'completed').length}</p>
-                      <p className="text-xs text-gray-400 mt-1">Sucesso no processamento</p>
-                    </Card>
-                    <Card className="p-6">
-                      <div className="flex items-center justify-between mb-4">
-                        <div className="p-2 bg-amber-50 rounded-lg"><Clock className="w-5 h-5 text-amber-600" /></div>
-                        <span className="text-xs font-bold uppercase text-gray-400">Em Fila</span>
-                      </div>
-                      <p className="text-3xl font-black text-gray-900">{transcriptions.filter(t => t.status === 'processing').length}</p>
-                      <p className="text-xs text-gray-400 mt-1">Aguardando análise</p>
-                    </Card>
-                  </div>
-
-                  <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
-                    <div className="lg:col-span-2 space-y-6">
-                      <div className="flex items-center justify-between">
-                        <h3 className="font-bold text-gray-900">Atividade Recente</h3>
-                        <Button variant="ghost" className="text-xs">Ver Tudo</Button>
-                      </div>
-                      <div className="space-y-3">
-                        {transcriptions.slice(0, 5).map(t => (
-                          <button 
-                            key={t.id} 
-                            onClick={() => setSelectedTranscription(t)}
-                            className="w-full p-4 bg-white border border-gray-100 rounded-2xl flex items-center gap-4 hover:border-blue-200 transition-all text-left group"
-                          >
-                            <div className="p-3 bg-gray-50 rounded-xl group-hover:bg-blue-50 transition-colors">
-                              {t.source === 'upload' ? <Upload className="w-5 h-5 text-gray-400 group-hover:text-blue-600" /> : 
-                               t.source === 'youtube' ? <Youtube className="w-5 h-5 text-gray-400 group-hover:text-blue-600" /> :
-                               t.source === 'instagram' ? <Instagram className="w-5 h-5 text-gray-400 group-hover:text-blue-600" /> : <HardDrive className="w-5 h-5 text-gray-400 group-hover:text-blue-600" />}
-                            </div>
-                            <div className="flex-1 min-w-0">
-                              <p className="font-bold text-gray-900 truncate">{t.title}</p>
-                              <p className="text-xs text-gray-400">{new Date(t.created_at).toLocaleString('pt-BR')}</p>
-                            </div>
-                            <Badge variant={t.status === 'completed' ? 'success' : 'warning'}>{t.status}</Badge>
-                            <ChevronRight className="w-4 h-4 text-gray-300" />
-                          </button>
-                        ))}
-                        {transcriptions.length === 0 && (
-                          <div className="p-12 text-center bg-white border border-dashed border-gray-200 rounded-3xl">
-                            <FileText className="w-12 h-12 text-gray-200 mx-auto mb-4" />
-                            <p className="text-gray-500">Nenhuma transcrição encontrada.</p>
-                            <Button onClick={() => setIsNewModalOpen(true)} variant="outline" className="mt-4">Criar Primeira</Button>
-                          </div>
-                        )}
-                      </div>
-                    </div>
-
-                    <div className="space-y-6">
-                      <h3 className="font-bold text-gray-900">Dicas Rápidas</h3>
-                      <Card className="p-6 space-y-4">
-                        <div className="space-y-3">
-                          <div className="flex gap-3">
-                            <div className="w-6 h-6 rounded-full bg-blue-100 text-blue-600 flex items-center justify-center text-[10px] font-bold shrink-0">1</div>
-                            <p className="text-xs text-gray-600">Use links do YouTube para transcrições rápidas de palestras.</p>
-                          </div>
-                          <div className="flex gap-3">
-                            <div className="w-6 h-6 rounded-full bg-blue-100 text-blue-600 flex items-center justify-center text-[10px] font-bold shrink-0">2</div>
-                            <p className="text-xs text-gray-600">Ative a minutagem para facilitar a navegação no texto.</p>
-                          </div>
-                          <div className="flex gap-3">
-                            <div className="w-6 h-6 rounded-full bg-blue-100 text-blue-600 flex items-center justify-center text-[10px] font-bold shrink-0">3</div>
-                            <p className="text-xs text-gray-600">Traduza para o Inglês para expandir seu alcance global.</p>
-                          </div>
-                        </div>
-                        <hr className="border-gray-50" />
-                        <div className="p-4 bg-blue-50 rounded-xl">
-                          <p className="text-[10px] font-bold text-blue-600 uppercase tracking-widest mb-1">Suporte</p>
-                          <p className="text-xs text-blue-700">Precisa de ajuda? Entre em contato com nosso time.</p>
-                        </div>
-                      </Card>
-                    </div>
-                  </div>
-                </motion.div>
-              )}
-            </AnimatePresence>
-          </div>
-        </main>
-
-        {/* --- New Transcription Modal --- */}
-        <AnimatePresence>
-          {isNewModalOpen && (
-            <div className="fixed inset-0 z-50 flex items-center justify-center p-2 sm:p-4">
-              <motion.div 
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                exit={{ opacity: 0 }}
-                onClick={() => setIsNewModalOpen(false)}
-                className="absolute inset-0 bg-gray-900/40 backdrop-blur-sm"
-              />
-              <motion.div 
-                initial={{ opacity: 0, scale: 0.95, y: 20 }}
-                animate={{ opacity: 1, scale: 1, y: 0 }}
-                exit={{ opacity: 0, scale: 0.95, y: 20 }}
-                className="bg-white w-full max-w-xl rounded-3xl shadow-2xl relative z-10 overflow-hidden max-h-[90vh] flex flex-col"
-              >
-                <div className="p-6 sm:p-8 space-y-6 overflow-y-auto">
-                  <div className="flex items-center justify-between">
-                    <h3 className="text-xl sm:text-2xl font-bold text-gray-900">Nova Transcrição</h3>
-                    <button onClick={() => setIsNewModalOpen(false)} className="p-2 hover:bg-gray-100 rounded-lg">
-                      <X className="w-5 h-5 text-gray-400" />
-                    </button>
-                  </div>
-
-                  <div className="space-y-4">
-                    <div className="space-y-1.5">
-                      <label className="text-xs font-bold text-gray-400 uppercase tracking-wider">Título do Projeto</label>
-                      <input 
-                        type="text" 
-                        placeholder="Ex: Reunião de Planejamento"
-                        className="w-full px-4 py-3 bg-gray-50 border-none rounded-xl focus:ring-2 focus:ring-blue-100 transition-all text-sm"
-                        value={newTitle}
-                        onChange={(e) => setNewTitle(e.target.value)}
-                      />
-                    </div>
-
-                    <div className="space-y-1.5">
-                      <label className="text-xs font-bold text-gray-400 uppercase tracking-wider">Fonte da Mídia</label>
-                      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-                        {[
-                          { id: 'upload', icon: Upload, label: 'Upload' },
-                          { id: 'youtube', icon: Youtube, label: 'YouTube' },
-                          { id: 'instagram', icon: Instagram, label: 'Insta' },
-                          { id: 'drive', icon: HardDrive, label: 'Drive' }
-                        ].map((s) => (
-                          <button
-                            key={s.id}
-                            onClick={() => setNewSource(s.id as any)}
-                            className={cn(
-                              'flex flex-col items-center gap-2 p-3 rounded-xl border-2 transition-all',
-                              newSource === s.id ? 'border-blue-600 bg-blue-50 text-blue-600' : 'border-gray-50 bg-gray-50 text-gray-400 hover:border-gray-200'
-                            )}
-                          >
-                            <s.icon className="w-5 h-5" />
-                            <span className="text-[10px] font-bold uppercase">{s.label}</span>
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-
-                    {newSource === 'upload' ? (
-                      <div {...getRootProps()} className={cn(
-                        'border-2 border-dashed rounded-2xl p-6 sm:p-8 text-center transition-all cursor-pointer',
-                        isDragActive ? 'border-blue-400 bg-blue-50' : 'border-gray-100 bg-gray-50 hover:border-gray-200'
-                      )}>
-                        <input {...getInputProps()} />
-                        {newFile ? (
-                          <div className="flex flex-col items-center gap-2">
-                            <div className="p-3 bg-blue-100 rounded-full">
-                              {newFile.type.startsWith('video') ? <FileVideo className="w-8 h-8 text-blue-600" /> : <FileAudio className="w-8 h-8 text-blue-600" />}
-                            </div>
-                            <p className="text-sm font-bold text-gray-700 truncate max-w-full">{newFile.name}</p>
-                            <p className="text-xs text-gray-400">{(newFile.size / 1024 / 1024).toFixed(2)} MB</p>
-                          </div>
-                        ) : (
-                          <div className="space-y-2">
-                            <div className="inline-flex p-3 bg-white rounded-xl shadow-sm">
-                              <Upload className="w-6 h-6 text-gray-400" />
-                            </div>
-                            <p className="text-sm font-medium text-gray-600">Arraste ou clique para selecionar</p>
-                            <p className="text-[10px] text-gray-400 uppercase tracking-wider">MP4, MP3, WAV, MOV (Máx 50MB)</p>
-                          </div>
-                        )}
-                      </div>
-                    ) : (
-                      <div className="space-y-1.5">
-                        <label className="text-xs font-bold text-gray-400 uppercase tracking-wider">Link da Mídia</label>
-                        <div className="relative">
-                          <Globe className="w-4 h-4 absolute left-4 top-4 text-gray-400" />
-                          <input 
-                            type="url" 
-                            placeholder="https://..."
-                            className="w-full pl-12 pr-4 py-3.5 bg-gray-50 border-none rounded-xl focus:ring-2 focus:ring-blue-100 transition-all text-sm"
-                            value={newUrl}
-                            onChange={(e) => setNewUrl(e.target.value)}
-                          />
-                        </div>
-                      </div>
-                    )}
-
-                    <div className="flex items-center justify-between p-4 bg-gray-50 rounded-2xl">
-                      <div className="flex items-center gap-3">
-                        <Clock className="w-5 h-5 text-gray-400" />
-                        <div>
-                          <p className="text-sm font-bold text-gray-700">Incluir Minutagem</p>
-                          <p className="text-[10px] text-gray-400">Adiciona marcações de tempo no texto</p>
-                        </div>
-                      </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  <div className="space-y-1.5">
+                    <label className="text-[10px] font-black text-gray-400 uppercase tracking-widest">Tipo</label>
+                    <div className="flex gap-2">
                       <button 
-                        onClick={() => setIncludeTimestamps(!includeTimestamps)}
+                        onClick={() => setFormType('chord')}
                         className={cn(
-                          'w-12 h-6 rounded-full transition-all relative',
-                          includeTimestamps ? 'bg-blue-600' : 'bg-gray-200'
+                          'flex-1 py-3 rounded-xl font-bold text-sm border-2 transition-all',
+                          formType === 'chord' ? 'border-blue-600 bg-blue-50 text-blue-600' : 'border-gray-50 bg-gray-50 text-gray-400'
                         )}
                       >
-                        <div className={cn(
-                          'w-4 h-4 bg-white rounded-full absolute top-1 transition-all',
-                          includeTimestamps ? 'right-1' : 'left-1'
-                        )} />
+                        Cifra
+                      </button>
+                      <button 
+                        onClick={() => setFormType('lyric')}
+                        className={cn(
+                          'flex-1 py-3 rounded-xl font-bold text-sm border-2 transition-all',
+                          formType === 'lyric' ? 'border-blue-600 bg-blue-50 text-blue-600' : 'border-gray-50 bg-gray-50 text-gray-400'
+                        )}
+                      >
+                        Letra
                       </button>
                     </div>
                   </div>
-
-                  <div className="flex flex-col gap-3 pt-2">
-                    <div className="flex flex-col sm:flex-row gap-3">
-                      <Button variant="secondary" className="w-full py-3 order-2 sm:order-1" onClick={() => setIsNewModalOpen(false)}>
-                        Cancelar
-                      </Button>
-                      <Button 
-                        className="w-full py-3 order-1 sm:order-2" 
-                        onClick={handleCreateTranscription}
-                        loading={isProcessing}
-                        disabled={!newTitle || (!newFile && !newUrl)}
-                      >
-                        {processingStep === 'uploading' ? 'Enviando...' :
-                         processingStep === 'transcribing' ? 'IA Transcrevendo...' :
-                         'Iniciar Transcrição'}
-                      </Button>
-                    </div>
-                    {isProcessing && (
-                      <div className="space-y-2">
-                        <div className="h-1 w-full bg-gray-100 rounded-full overflow-hidden">
-                          <motion.div 
-                            initial={{ width: 0 }}
-                            animate={{ width: processingStep === 'uploading' ? '40%' : '80%' }}
-                            className="h-full bg-blue-600"
-                          />
-                        </div>
-                        <p className="text-center text-[10px] font-bold text-blue-600 uppercase tracking-widest animate-pulse">
-                          {processingStep === 'uploading' ? 'Enviando arquivo para o servidor...' : 
-                           'Aguarde, a IA está analisando o conteúdo...'}
-                        </p>
-                      </div>
-                    )}
+                  <div className="space-y-1.5">
+                    <label className="text-[10px] font-black text-gray-400 uppercase tracking-widest">Tom Original</label>
+                    <select 
+                      className="w-full px-4 py-3 bg-gray-50 border-none rounded-xl focus:ring-2 focus:ring-blue-100 transition-all"
+                      value={formKey}
+                      onChange={(e) => setFormKey(e.target.value)}
+                    >
+                      {NOTES.map(n => <option key={n} value={n}>{n}</option>)}
+                    </select>
                   </div>
                 </div>
-              </motion.div>
-            </div>
-          )}
-        </AnimatePresence>
-      </div>
-    </ErrorBoundary>
+
+                <div className="space-y-1.5">
+                  <label className="text-[10px] font-black text-gray-400 uppercase tracking-widest">Conteúdo (Cifra ou Letra)</label>
+                  <textarea 
+                    className="w-full h-48 lg:h-64 px-4 py-4 bg-gray-50 border-none rounded-2xl focus:ring-2 focus:ring-blue-100 transition-all font-mono text-sm leading-relaxed"
+                    placeholder="Cole aqui a cifra ou letra..."
+                    value={formContent}
+                    onChange={(e) => setFormContent(e.target.value)}
+                  />
+                </div>
+
+                <div className="flex gap-3 pt-4">
+                  <button onClick={closeModal} className="flex-1 py-4 bg-gray-100 text-gray-600 rounded-2xl font-bold hover:bg-gray-200 transition-all">Cancelar</button>
+                  <button onClick={handleSaveSong} className="flex-1 py-4 bg-blue-600 text-white rounded-2xl font-bold hover:bg-blue-700 transition-all shadow-lg shadow-blue-200">Salvar Música</button>
+                </div>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Notice Modal */}
+      <AnimatePresence>
+        {isNoticeModalOpen && (
+          <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
+            <motion.div 
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={closeNoticeModal}
+              className="absolute inset-0 bg-gray-900/40 backdrop-blur-sm"
+            />
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.95, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 20 }}
+              className="bg-white w-full max-w-2xl rounded-3xl shadow-2xl relative z-10 overflow-hidden flex flex-col max-h-[90vh]"
+            >
+              <div className="p-6 lg:p-8 space-y-6 overflow-y-auto">
+                <div className="flex items-center justify-between">
+                  <h3 className="text-2xl font-black text-gray-900">{editingNotice ? 'Editar Aviso/Escala' : 'Novo Aviso/Escala'}</h3>
+                  <button onClick={closeNoticeModal} className="p-2 hover:bg-gray-100 rounded-xl"><X className="w-6 h-6 text-gray-400" /></button>
+                </div>
+
+                <div className="space-y-1.5">
+                  <label className="text-[10px] font-black text-gray-400 uppercase tracking-widest">Título</label>
+                  <input 
+                    type="text" 
+                    className="w-full px-4 py-3 bg-gray-50 border-none rounded-xl focus:ring-2 focus:ring-blue-100 transition-all"
+                    value={noticeTitle}
+                    onChange={(e) => setNoticeTitle(e.target.value)}
+                    placeholder="Ex: Escala de Domingo"
+                  />
+                </div>
+
+                <div className="space-y-1.5">
+                  <label className="text-[10px] font-black text-gray-400 uppercase tracking-widest">Tipo</label>
+                  <div className="flex gap-2">
+                    <button 
+                      onClick={() => setNoticeType('aviso')}
+                      className={cn(
+                        'flex-1 py-3 rounded-xl font-bold text-sm border-2 transition-all',
+                        noticeType === 'aviso' ? 'border-amber-600 bg-amber-50 text-amber-600' : 'border-gray-50 bg-gray-50 text-gray-400'
+                      )}
+                    >
+                      Aviso
+                    </button>
+                    <button 
+                      onClick={() => setNoticeType('escala')}
+                      className={cn(
+                        'flex-1 py-3 rounded-xl font-bold text-sm border-2 transition-all',
+                        noticeType === 'escala' ? 'border-purple-600 bg-purple-50 text-purple-600' : 'border-gray-50 bg-gray-50 text-gray-400'
+                      )}
+                    >
+                      Escala
+                    </button>
+                  </div>
+                </div>
+
+                <div className="space-y-1.5">
+                  <label className="text-[10px] font-black text-gray-400 uppercase tracking-widest">Conteúdo</label>
+                  <textarea 
+                    className="w-full h-48 lg:h-64 px-4 py-4 bg-gray-50 border-none rounded-2xl focus:ring-2 focus:ring-blue-100 transition-all font-sans text-sm lg:text-base leading-relaxed"
+                    placeholder="Escreva aqui os avisos ou a escala..."
+                    value={noticeContent}
+                    onChange={(e) => setNoticeContent(e.target.value)}
+                  />
+                </div>
+
+                <div className="flex gap-3 pt-4">
+                  <button onClick={closeNoticeModal} className="flex-1 py-4 bg-gray-100 text-gray-600 rounded-2xl font-bold hover:bg-gray-200 transition-all">Cancelar</button>
+                  <button onClick={handleSaveNotice} className="flex-1 py-4 bg-blue-600 text-white rounded-2xl font-bold hover:bg-blue-700 transition-all shadow-lg shadow-blue-200">Salvar</button>
+                </div>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+    </div>
   );
 }
