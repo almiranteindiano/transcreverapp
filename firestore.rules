@@ -1,0 +1,47 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Helper functions
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+    
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+    
+    function isDocOwner() {
+      return isAuthenticated() && request.auth.uid == resource.data.uid;
+    }
+    
+    function isNewDocOwner() {
+      return isAuthenticated() && request.auth.uid == request.resource.data.uid;
+    }
+
+    // User profiles
+    match /users/{userId} {
+      allow read, write: if isOwner(userId);
+    }
+
+    // Songs
+    match /songs/{songId} {
+      allow read: if isDocOwner();
+      allow create: if isNewDocOwner();
+      allow update, delete: if isDocOwner();
+    }
+
+    // Setlists
+    match /setlists/{setlistId} {
+      allow read: if isDocOwner();
+      allow create: if isNewDocOwner();
+      allow update, delete: if isDocOwner();
+    }
+
+    // Notices
+    match /notices/{noticeId} {
+      allow read: if isDocOwner();
+      allow create: if isNewDocOwner();
+      allow update, delete: if isDocOwner();
+    }
+  }
+}

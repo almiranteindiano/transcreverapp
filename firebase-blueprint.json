@@ -1,0 +1,79 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "User profile information",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "email": { "type": "string" },
+        "displayName": { "type": "string" },
+        "accidentalPreference": { "type": "string", "enum": ["mixed", "sharps", "flats"] }
+      },
+      "required": ["uid", "email"]
+    },
+    "Song": {
+      "title": "Song",
+      "description": "A worship song with chords or lyrics",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "uid": { "type": "string" },
+        "title": { "type": "string" },
+        "artist": { "type": "string" },
+        "content": { "type": "string" },
+        "key": { "type": "string" },
+        "type": { "type": "string", "enum": ["chord", "lyric"] },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "title", "content", "type"]
+    },
+    "Setlist": {
+      "title": "Setlist",
+      "description": "A collection of songs for a specific service",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "uid": { "type": "string" },
+        "name": { "type": "string" },
+        "date": { "type": "string" },
+        "songs": { "type": "array", "items": { "type": "string" } },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "name", "date", "songs"]
+    },
+    "Notice": {
+      "title": "Notice",
+      "description": "A notice or scale for the worship team",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "uid": { "type": "string" },
+        "title": { "type": "string" },
+        "date": { "type": "string" },
+        "type": { "type": "string", "enum": ["aviso", "escala"] },
+        "content": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "title", "date", "type", "content"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "User profiles"
+    },
+    "/songs/{songId}": {
+      "schema": "Song",
+      "description": "Worship songs"
+    },
+    "/setlists/{setlistId}": {
+      "schema": "Setlist",
+      "description": "Worship setlists"
+    },
+    "/notices/{noticeId}": {
+      "schema": "Notice",
+      "description": "Worship team notices and scales"
+    }
+  }
+}

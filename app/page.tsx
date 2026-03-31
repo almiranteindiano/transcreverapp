@@ -1,12 +1,13 @@
 'use client';
 
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { 
   Music, FileText, ListMusic, Plus, Search, 
   Download, Share2, Trash2, Edit3, Save, 
   ChevronRight, ChevronLeft, Upload, FileDown,
   ArrowRightLeft, Palette, Check, X, Copy, CheckCircle2,
-  Printer, MessageCircle, Menu, LogOut, Bell, Calendar
+  Printer, MessageCircle, Menu, LogOut, Bell, Calendar,
+  Key, Settings, User, Mail, Lock, Eye, EyeOff, AlertCircle
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { clsx, type ClassValue } from 'clsx';
@@ -14,6 +15,28 @@ import { twMerge } from 'tailwind-merge';
 import { jsPDF } from 'jspdf';
 import { Document, Packer, Paragraph, TextRun } from 'docx';
 import { saveAs } from 'file-saver';
+import { auth, db } from '../lib/firebase';
+import { 
+  signInWithEmailAndPassword, 
+  createUserWithEmailAndPassword, 
+  onAuthStateChanged, 
+  signOut,
+  updateProfile
+} from 'firebase/auth';
+import { 
+  collection, 
+  query, 
+  where, 
+  onSnapshot, 
+  addDoc, 
+  updateDoc, 
+  deleteDoc, 
+  doc, 
+  serverTimestamp,
+  orderBy,
+  setDoc,
+  getDoc
+} from 'firebase/firestore';
 
 function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
@@ -22,53 +45,58 @@ function cn(...inputs: ClassValue[]) {
 // --- Types ---
 interface Song {
   id: string;
+  uid: string;
   title: string;
   artist: string;
   content: string;
   type: 'chord' | 'lyric';
   key: string;
   originalKey: string;
+  createdAt?: any;
 }
 
 interface Setlist {
   id: string;
+  uid: string;
   name: string;
   date: string;
   songs: string[]; // IDs of songs
+  createdAt?: any;
 }
 
 interface Notice {
   id: string;
+  uid: string;
   title: string;
   content: string;
   date: string;
   type: 'aviso' | 'escala';
+  createdAt?: any;
+}
+
+interface UserProfile {
+  uid: string;
+  email: string;
+  displayName: string;
+  accidentalPreference: 'mixed' | 'sharps' | 'flats';
 }
 
 // --- Constants ---
 const SHARP_NOTES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
 const FLAT_NOTES = ['C', 'Db', 'D', 'Eb', 'E', 'F', 'Gb', 'G', 'Ab', 'A', 'Bb', 'B'];
+const MIXED_NOTES = ['C', 'C#', 'D', 'Eb', 'E', 'F', 'F#', 'G', 'Ab', 'A', 'Bb', 'B'];
 
-// Keys that prefer flats (including their relative minors)
-const FLAT_KEYS = ['F', 'Bb', 'Eb', 'Ab', 'Db', 'Gb', 'Dm', 'Gm', 'Cm', 'Fm', 'Bbm', 'Ebm'];
+const ALL_KEYS = ['C', 'C#', 'Db', 'D', 'D#', 'Eb', 'E', 'F', 'F#', 'Gb', 'G', 'G#', 'Ab', 'A', 'A#', 'Bb', 'B'];
 
-// Preferred key names for the 12 semitones
-const KEY_NAMES = ['C', 'Db', 'D', 'Eb', 'E', 'F', 'F#', 'G', 'Ab', 'A', 'Bb', 'B'];
-
-const getBestNoteName = (index: number, targetKey: string): string => {
+const getBestNoteName = (index: number, preference: 'mixed' | 'sharps' | 'flats'): string => {
   const normalizedIndex = (index % 12 + 12) % 12;
-  // If the target key is one that prefers flats, use flat names for all chords
-  const isFlatKey = FLAT_KEYS.some(k => targetKey === k || targetKey.startsWith(k + 'm') || targetKey.startsWith(k + ' '));
-  
-  // Special case: if we are in a sharp key but the note is Bb or Eb, they are still very common
-  // But let's stick to the harmonic field rule first.
-  return isFlatKey ? FLAT_NOTES[normalizedIndex] : SHARP_NOTES[normalizedIndex];
+  if (preference === 'sharps') return SHARP_NOTES[normalizedIndex];
+  if (preference === 'flats') return FLAT_NOTES[normalizedIndex];
+  return MIXED_NOTES[normalizedIndex];
 };
 
-const FLATS: Record<string, string> = { 'Db': 'C#', 'Eb': 'D#', 'Gb': 'F#', 'Ab': 'G#', 'Bb': 'A#' };
-
 // --- Utils ---
-const transposeChord = (chord: string, semitones: number, targetKey: string): string => {
+const transposeChord = (chord: string, semitones: number, preference: 'mixed' | 'sharps' | 'flats'): string => {
   const match = chord.match(/^([A-G][b#]?)(.*)$/);
   if (!match) return chord;
   
@@ -76,27 +104,24 @@ const transposeChord = (chord: string, semitones: number, targetKey: string): st
   const suffix = match[2];
   
   // Normalize to sharp for indexing
-  if (note === 'Db') note = 'C#';
-  else if (note === 'Eb') note = 'D#';
-  else if (note === 'Gb') note = 'F#';
-  else if (note === 'Ab') note = 'G#';
-  else if (note === 'Bb') note = 'A#';
+  const sharpIndex = SHARP_NOTES.indexOf(note);
+  const flatIndex = FLAT_NOTES.indexOf(note);
+  const index = sharpIndex !== -1 ? sharpIndex : flatIndex;
   
-  const index = SHARP_NOTES.indexOf(note);
   if (index === -1) return chord;
   
   const newIndex = (index + semitones) % 12;
-  return getBestNoteName(newIndex, targetKey) + suffix;
+  return getBestNoteName(newIndex, preference) + suffix;
 };
 
-const transposeContent = (content: string, semitones: number, targetKey: string): string => {
+const transposeContent = (content: string, semitones: number, preference: 'mixed' | 'sharps' | 'flats'): string => {
   const chordRegex = /\b[A-G][b#]?(m|maj|min|aug|dim|sus|add|2|4|5|6|7|9|11|13)*(\/[A-G][b#]?)?\b/g;
   return content.replace(chordRegex, (match) => {
     if (match.includes('/')) {
       const [base, bass] = match.split('/');
-      return transposeChord(base, semitones, targetKey) + '/' + transposeChord(bass, semitones, targetKey);
+      return transposeChord(base, semitones, preference) + '/' + transposeChord(bass, semitones, preference);
     }
-    return transposeChord(match, semitones, targetKey);
+    return transposeChord(match, semitones, preference);
   });
 };
 
@@ -114,6 +139,16 @@ const highlightChords = (text: string) => {
 
 // --- Main Component ---
 export default function WorshipApp() {
+  const [user, setUser] = useState<any>(null);
+  const [userProfile, setUserProfile] = useState<UserProfile | null>(null);
+  const [isAuthLoading, setIsAuthLoading] = useState(true);
+  const [authMode, setAuthMode] = useState<'login' | 'register'>('login');
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [displayName, setDisplayName] = useState('');
+  const [authError, setAuthError] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
+
   const [activeTab, setActiveTab] = useState<'chords' | 'lyrics' | 'setlists' | 'notices'>('chords');
   const [songs, setSongs] = useState<Song[]>([]);
   const [setlists, setSetlists] = useState<Setlist[]>([]);
@@ -122,6 +157,7 @@ export default function WorshipApp() {
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [isNoticeModalOpen, setIsNoticeModalOpen] = useState(false);
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
+  const [isKeySelectorOpen, setIsKeySelectorOpen] = useState(false);
   const [editingSong, setEditingSong] = useState<Song | null>(null);
   const [editingNotice, setEditingNotice] = useState<Notice | null>(null);
   const [selectedSong, setSelectedSong] = useState<Song | null>(null);
@@ -141,68 +177,139 @@ export default function WorshipApp() {
   const [noticeContent, setNoticeContent] = useState('');
   const [noticeType, setNoticeType] = useState<'aviso' | 'escala'>('aviso');
 
-  // Load Initial Data
+  // Auth Listener
   useEffect(() => {
-    const savedSongs = localStorage.getItem('worship_songs');
-    const savedSetlists = localStorage.getItem('worship_setlists');
-    const savedNotices = localStorage.getItem('worship_notices');
-    if (savedSongs) setSongs(JSON.parse(savedSongs));
-    if (savedSetlists) setSetlists(JSON.parse(savedSetlists));
-    if (savedNotices) setNotices(JSON.parse(savedNotices));
+    const unsubscribe = onAuthStateChanged(auth, async (user) => {
+      setUser(user);
+      if (user) {
+        const docRef = doc(db, 'users', user.uid);
+        const docSnap = await getDoc(docRef);
+        if (docSnap.exists()) {
+          setUserProfile(docSnap.data() as UserProfile);
+        } else {
+          const newProfile: UserProfile = {
+            uid: user.uid,
+            email: user.email || '',
+            displayName: user.displayName || '',
+            accidentalPreference: 'mixed'
+          };
+          await setDoc(docRef, newProfile);
+          setUserProfile(newProfile);
+        }
+      } else {
+        setUserProfile(null);
+      }
+      setIsAuthLoading(false);
+    });
+    return () => unsubscribe();
   }, []);
 
-  // Save Data
+  // Data Listeners
   useEffect(() => {
-    localStorage.setItem('worship_songs', JSON.stringify(songs));
-    localStorage.setItem('worship_setlists', JSON.stringify(setlists));
-    localStorage.setItem('worship_notices', JSON.stringify(notices));
-  }, [songs, setlists, notices]);
+    if (!user) {
+      setSongs([]);
+      setSetlists([]);
+      setNotices([]);
+      return;
+    }
 
-  const filteredSongs = songs.filter(s => 
+    const songsQuery = query(collection(db, 'songs'), where('uid', '==', user.uid), orderBy('createdAt', 'desc'));
+    const setlistsQuery = query(collection(db, 'setlists'), where('uid', '==', user.uid), orderBy('createdAt', 'desc'));
+    const noticesQuery = query(collection(db, 'notices'), where('uid', '==', user.uid), orderBy('createdAt', 'desc'));
+
+    const unsubSongs = onSnapshot(songsQuery, (snap) => {
+      setSongs(snap.docs.map(d => ({ id: d.id, ...d.data() } as Song)));
+    });
+    const unsubSetlists = onSnapshot(setlistsQuery, (snap) => {
+      setSetlists(snap.docs.map(d => ({ id: d.id, ...d.data() } as Setlist)));
+    });
+    const unsubNotices = onSnapshot(noticesQuery, (snap) => {
+      setNotices(snap.docs.map(d => ({ id: d.id, ...d.data() } as Notice)));
+    });
+
+    return () => {
+      unsubSongs();
+      unsubSetlists();
+      unsubNotices();
+    };
+  }, [user]);
+
+  const handleAuth = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setAuthError('');
+    try {
+      if (authMode === 'login') {
+        await signInWithEmailAndPassword(auth, email, password);
+      } else {
+        const res = await createUserWithEmailAndPassword(auth, email, password);
+        await updateProfile(res.user, { displayName });
+      }
+    } catch (err: any) {
+      setAuthError(err.message);
+    }
+  };
+
+  const handleLogout = async () => {
+    if (confirm('Deseja sair do sistema?')) {
+      await signOut(auth);
+      setSelectedSong(null);
+      setSelectedSetlist(null);
+      setSelectedNotice(null);
+    }
+  };
+
+  const updateAccidentalPreference = async (pref: 'mixed' | 'sharps' | 'flats') => {
+    if (!user) return;
+    const docRef = doc(db, 'users', user.uid);
+    await updateDoc(docRef, { accidentalPreference: pref });
+    setUserProfile(prev => prev ? { ...prev, accidentalPreference: pref } : null);
+  };
+
+  const filteredSongs = useMemo(() => songs.filter(s => 
     s.type === (activeTab === 'chords' ? 'chord' : 'lyric') &&
     (s.title.toLowerCase().includes(searchQuery.toLowerCase()) || 
      s.artist.toLowerCase().includes(searchQuery.toLowerCase()))
-  );
+  ), [songs, activeTab, searchQuery]);
 
-  const handleSaveSong = () => {
-    if (!formTitle || !formContent) return;
+  const handleSaveSong = async () => {
+    if (!formTitle || !formContent || !user) return;
 
-    const newSong: Song = {
-      id: editingSong?.id || Date.now().toString(),
+    const songData = {
+      uid: user.uid,
       title: formTitle,
       artist: formArtist,
       content: formContent,
       type: formType,
       key: formKey,
-      originalKey: editingSong?.originalKey || formKey
+      originalKey: editingSong?.originalKey || formKey,
+      createdAt: editingSong?.createdAt || serverTimestamp()
     };
 
     if (editingSong) {
-      setSongs(songs.map(s => s.id === editingSong.id ? newSong : s));
-      if (selectedSong?.id === editingSong.id) setSelectedSong(newSong);
+      await updateDoc(doc(db, 'songs', editingSong.id), songData);
     } else {
-      setSongs([newSong, ...songs]);
+      await addDoc(collection(db, 'songs'), songData);
     }
 
     closeModal();
   };
 
-  const handleSaveNotice = () => {
-    if (!noticeTitle || !noticeContent) return;
+  const handleSaveNotice = async () => {
+    if (!noticeTitle || !noticeContent || !user) return;
 
-    const newNotice: Notice = {
-      id: editingNotice?.id || Date.now().toString(),
+    const noticeData = {
+      uid: user.uid,
       title: noticeTitle,
       content: noticeContent,
       type: noticeType,
-      date: new Date().toLocaleDateString('pt-BR')
+      date: new Date().toLocaleDateString('pt-BR'),
+      createdAt: editingNotice?.createdAt || serverTimestamp()
     };
 
     if (editingNotice) {
-      setNotices(notices.map(n => n.id === editingNotice.id ? newNotice : n));
-      if (selectedNotice?.id === editingNotice.id) setSelectedNotice(newNotice);
+      await updateDoc(doc(db, 'notices', editingNotice.id), noticeData);
     } else {
-      setNotices([newNotice, ...notices]);
+      await addDoc(collection(db, 'notices'), noticeData);
     }
 
     closeNoticeModal();
@@ -242,25 +349,17 @@ export default function WorshipApp() {
     setIsNoticeModalOpen(true);
   };
 
-  const handleDeleteSong = (id: string) => {
+  const handleDeleteSong = async (id: string) => {
     if (confirm('Deseja excluir esta música?')) {
-      setSongs(songs.filter(s => s.id !== id));
+      await deleteDoc(doc(db, 'songs', id));
       if (selectedSong?.id === id) setSelectedSong(null);
     }
   };
 
-  const handleDeleteNotice = (id: string) => {
+  const handleDeleteNotice = async (id: string) => {
     if (confirm('Deseja excluir este aviso/escala?')) {
-      setNotices(notices.filter(n => n.id !== id));
+      await deleteDoc(doc(db, 'notices', id));
       if (selectedNotice?.id === id) setSelectedNotice(null);
-    }
-  };
-
-  const handleLogout = () => {
-    if (confirm('Deseja sair do sistema?')) {
-      // For now, just clear and reload
-      localStorage.clear();
-      window.location.reload();
     }
   };
 
@@ -271,9 +370,8 @@ export default function WorshipApp() {
     let newIndex = (currentIndex + semitones) % 12;
     if (newIndex < 0) newIndex += 12;
     
-    // Determine target key name first to guide chord naming
-    const targetKey = KEY_NAMES[newIndex];
-    const newContent = transposeContent(selectedSong.content, semitones, targetKey);
+    const targetKey = getBestNoteName(newIndex, userProfile?.accidentalPreference || 'mixed');
+    const newContent = transposeContent(selectedSong.content, semitones, userProfile?.accidentalPreference || 'mixed');
     
     const updatedSong = {
       ...selectedSong,
@@ -282,7 +380,29 @@ export default function WorshipApp() {
     };
     
     setSelectedSong(updatedSong);
-    setSongs(songs.map(s => s.id === selectedSong.id ? updatedSong : s));
+    updateDoc(doc(db, 'songs', selectedSong.id), { content: newContent, key: targetKey });
+  };
+
+  const handleQuickKeyChange = (newKey: string) => {
+    if (!selectedSong) return;
+    
+    const currentIndex = SHARP_NOTES.indexOf(selectedSong.key.replace('Db', 'C#').replace('Eb', 'D#').replace('Gb', 'F#').replace('Ab', 'G#').replace('Bb', 'A#'));
+    const targetIndex = SHARP_NOTES.indexOf(newKey.replace('Db', 'C#').replace('Eb', 'D#').replace('Gb', 'F#').replace('Ab', 'G#').replace('Bb', 'A#'));
+    
+    if (currentIndex === -1 || targetIndex === -1) return;
+    
+    let semitones = targetIndex - currentIndex;
+    const newContent = transposeContent(selectedSong.content, semitones, userProfile?.accidentalPreference || 'mixed');
+    
+    const updatedSong = {
+      ...selectedSong,
+      content: newContent,
+      key: newKey
+    };
+    
+    setSelectedSong(updatedSong);
+    updateDoc(doc(db, 'songs', selectedSong.id), { content: newContent, key: newKey });
+    setIsKeySelectorOpen(false);
   };
 
   // Export Functions
@@ -335,65 +455,178 @@ export default function WorshipApp() {
     saveAs(blob, `${notice.title}.txt`);
   };
 
-  const handleImportTXT = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleImportTXT = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    if (!file) return;
+    if (!file || !user) return;
     const reader = new FileReader();
-    reader.onload = (event) => {
+    reader.onload = async (event) => {
       const content = event.target?.result as string;
-      setFormContent(content);
-      setFormTitle(file.name.replace('.txt', ''));
-      setFormType(activeTab === 'chords' ? 'chord' : 'lyric');
-      setIsModalOpen(true);
+      const songData = {
+        uid: user.uid,
+        title: file.name.replace('.txt', ''),
+        artist: 'Importado',
+        content: content,
+        type: activeTab === 'chords' ? 'chord' : 'lyric',
+        key: 'C',
+        originalKey: 'C',
+        createdAt: serverTimestamp()
+      };
+      await addDoc(collection(db, 'songs'), songData);
     };
     reader.readAsText(file);
   };
 
   // Setlist Functions
-  const handleCreateSetlist = () => {
+  const handleCreateSetlist = async () => {
     const name = prompt('Nome do Setlist:');
-    if (!name) return;
-    const newSetlist: Setlist = {
-      id: Date.now().toString(),
+    if (!name || !user) return;
+    await addDoc(collection(db, 'setlists'), {
+      uid: user.uid,
       name,
       date: new Date().toLocaleDateString('pt-BR'),
-      songs: []
-    };
-    setSetlists([newSetlist, ...setlists]);
+      songs: [],
+      createdAt: serverTimestamp()
+    });
   };
 
-  const handleDeleteSetlist = (id: string) => {
+  const handleDeleteSetlist = async (id: string) => {
     if (confirm('Deseja excluir este setlist?')) {
-      setSetlists(setlists.filter(sl => sl.id !== id));
+      await deleteDoc(doc(db, 'setlists', id));
       if (selectedSetlist?.id === id) setSelectedSetlist(null);
     }
   };
 
-  const handleEditSetlist = (sl: Setlist) => {
+  const handleEditSetlist = async (sl: Setlist) => {
     const newName = prompt('Novo nome do Setlist:', sl.name);
     if (!newName) return;
-    const updatedSetlist = { ...sl, name: newName };
-    setSetlists(setlists.map(s => s.id === sl.id ? updatedSetlist : s));
-    if (selectedSetlist?.id === sl.id) setSelectedSetlist(updatedSetlist);
+    await updateDoc(doc(db, 'setlists', sl.id), { name: newName });
   };
 
-  const addToSetlist = (songId: string, setlistId: string) => {
-    setSetlists(setlists.map(sl => {
-      if (sl.id === setlistId && !sl.songs.includes(songId)) {
-        return { ...sl, songs: [...sl.songs, songId] };
-      }
-      return sl;
-    }));
+  const addToSetlist = async (songId: string, setlistId: string) => {
+    const sl = setlists.find(s => s.id === setlistId);
+    if (sl && !sl.songs.includes(songId)) {
+      await updateDoc(doc(db, 'setlists', setlistId), { songs: [...sl.songs, songId] });
+    }
   };
 
-  const removeFromSetlist = (songId: string, setlistId: string) => {
-    setSetlists(setlists.map(sl => {
-      if (sl.id === setlistId) {
-        return { ...sl, songs: sl.songs.filter(id => id !== songId) };
-      }
-      return sl;
-    }));
+  const removeFromSetlist = async (songId: string, setlistId: string) => {
+    const sl = setlists.find(s => s.id === setlistId);
+    if (sl) {
+      await updateDoc(doc(db, 'setlists', setlistId), { songs: sl.songs.filter(id => id !== songId) });
+    }
   };
+
+  if (isAuthLoading) {
+    return (
+      <div className="min-h-screen bg-gray-50 flex items-center justify-center">
+        <div className="w-12 h-12 border-4 border-blue-600 border-t-transparent rounded-full animate-spin" />
+      </div>
+    );
+  }
+
+  if (!user) {
+    return (
+      <div className="min-h-screen bg-gray-50 flex items-center justify-center p-4">
+        <motion.div 
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="w-full max-w-md bg-white rounded-3xl shadow-xl shadow-blue-100 overflow-hidden"
+        >
+          <div className="p-8 text-center bg-blue-600 text-white">
+            <div className="w-16 h-16 bg-white/20 rounded-2xl flex items-center justify-center mx-auto mb-4">
+              <Music className="w-10 h-10" />
+            </div>
+            <h1 className="text-3xl font-black tracking-tight">WorshipApp</h1>
+            <p className="text-blue-100 mt-2">Gestão de louvor simplificada</p>
+          </div>
+
+          <div className="p-8">
+            <form onSubmit={handleAuth} className="space-y-4">
+              {authMode === 'register' && (
+                <div className="space-y-1">
+                  <label className="text-xs font-bold text-gray-400 uppercase tracking-widest ml-1">Nome</label>
+                  <div className="relative">
+                    <User className="w-5 h-5 absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
+                    <input 
+                      type="text" 
+                      required
+                      value={displayName}
+                      onChange={(e) => setDisplayName(e.target.value)}
+                      className="w-full pl-10 pr-4 py-3 bg-gray-50 border-none rounded-2xl focus:ring-2 focus:ring-blue-100 transition-all"
+                      placeholder="Seu nome"
+                    />
+                  </div>
+                </div>
+              )}
+
+              <div className="space-y-1">
+                <label className="text-xs font-bold text-gray-400 uppercase tracking-widest ml-1">Email</label>
+                <div className="relative">
+                  <Mail className="w-5 h-5 absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
+                  <input 
+                    type="email" 
+                    required
+                    value={email}
+                    onChange={(e) => setEmail(e.target.value)}
+                    className="w-full pl-10 pr-4 py-3 bg-gray-50 border-none rounded-2xl focus:ring-2 focus:ring-blue-100 transition-all"
+                    placeholder="seu@email.com"
+                  />
+                </div>
+              </div>
+
+              <div className="space-y-1">
+                <label className="text-xs font-bold text-gray-400 uppercase tracking-widest ml-1">Senha</label>
+                <div className="relative">
+                  <Lock className="w-5 h-5 absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
+                  <input 
+                    type={showPassword ? "text" : "password"} 
+                    required
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    className="w-full pl-10 pr-12 py-3 bg-gray-50 border-none rounded-2xl focus:ring-2 focus:ring-blue-100 transition-all"
+                    placeholder="••••••••"
+                  />
+                  <button 
+                    type="button"
+                    onClick={() => setShowPassword(!showPassword)}
+                    className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"
+                  >
+                    {showPassword ? <EyeOff className="w-5 h-5" /> : <Eye className="w-5 h-5" />}
+                  </button>
+                </div>
+              </div>
+
+              {authError && (
+                <div className="flex items-center gap-2 p-3 bg-red-50 text-red-600 rounded-xl text-sm">
+                  <AlertCircle className="w-4 h-4 shrink-0" />
+                  <p>{authError}</p>
+                </div>
+              )}
+
+              <button 
+                type="submit"
+                className="w-full bg-blue-600 text-white py-4 rounded-2xl font-bold hover:bg-blue-700 transition-all shadow-lg shadow-blue-200 mt-4"
+              >
+                {authMode === 'login' ? 'Entrar' : 'Criar Conta'}
+              </button>
+            </form>
+
+            <div className="mt-8 text-center">
+              <p className="text-gray-400 text-sm">
+                {authMode === 'login' ? 'Não tem uma conta?' : 'Já tem uma conta?'}
+                <button 
+                  onClick={() => setAuthMode(authMode === 'login' ? 'register' : 'login')}
+                  className="text-blue-600 font-bold ml-2 hover:underline"
+                >
+                  {authMode === 'login' ? 'Cadastre-se' : 'Entrar'}
+                </button>
+              </p>
+            </div>
+          </div>
+        </motion.div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-gray-50 font-sans text-gray-900 flex flex-col lg:flex-row h-screen overflow-hidden">
@@ -676,7 +909,40 @@ export default function WorshipApp() {
                       <span className="text-xs font-bold text-gray-400 uppercase tracking-widest">Tom</span>
                       <div className="flex items-center gap-2">
                         <button onClick={() => handleTranspose(-1)} className="p-1.5 bg-white border border-gray-200 rounded-lg hover:bg-gray-100"><ChevronLeft className="w-4 h-4" /></button>
-                        <span className="w-8 text-center font-black text-blue-600">{selectedSong.key}</span>
+                        <div className="relative">
+                          <button 
+                            onClick={() => setIsKeySelectorOpen(!isKeySelectorOpen)}
+                            className="w-12 py-1 text-center font-black text-blue-600 bg-white border border-blue-100 rounded-lg hover:bg-blue-50 transition-all"
+                          >
+                            {selectedSong.key}
+                          </button>
+                          <AnimatePresence>
+                            {isKeySelectorOpen && (
+                              <>
+                                <div className="fixed inset-0 z-10" onClick={() => setIsKeySelectorOpen(false)} />
+                                <motion.div 
+                                  initial={{ opacity: 0, scale: 0.9, y: 10 }}
+                                  animate={{ opacity: 1, scale: 1, y: 0 }}
+                                  exit={{ opacity: 0, scale: 0.9, y: 10 }}
+                                  className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 w-48 bg-white border border-gray-200 rounded-2xl shadow-2xl z-20 p-3 grid grid-cols-4 gap-1"
+                                >
+                                  {ALL_KEYS.map(k => (
+                                    <button 
+                                      key={k}
+                                      onClick={() => handleQuickKeyChange(k)}
+                                      className={cn(
+                                        "p-2 text-xs font-bold rounded-lg transition-all",
+                                        selectedSong.key === k ? "bg-blue-600 text-white" : "hover:bg-gray-100 text-gray-600"
+                                      )}
+                                    >
+                                      {k}
+                                    </button>
+                                  ))}
+                                </motion.div>
+                              </>
+                            )}
+                          </AnimatePresence>
+                        </div>
                         <button onClick={() => handleTranspose(1)} className="p-1.5 bg-white border border-gray-200 rounded-lg hover:bg-gray-100"><ChevronRight className="w-4 h-4" /></button>
                       </div>
                     </div>
@@ -688,6 +954,28 @@ export default function WorshipApp() {
                     <button onClick={() => shareWhatsApp(selectedSong)} className="p-2 hover:bg-white rounded-lg text-green-600" title="WhatsApp"><MessageCircle className="w-5 h-5" /></button>
                   </div>
                   <div className="flex-1" />
+                  
+                  {/* Accidental Preference Selector */}
+                  <div className="flex items-center bg-white border border-gray-200 rounded-xl p-1">
+                    {[
+                      { id: 'mixed', label: '1', title: 'C#, Eb, F#, Ab, Bb' },
+                      { id: 'sharps', label: '2', title: 'C#, D#, F#, G#, A#' },
+                      { id: 'flats', label: '3', title: 'Db, Eb, Gb, Ab, Bb' }
+                    ].map(opt => (
+                      <button
+                        key={opt.id}
+                        onClick={() => updateAccidentalPreference(opt.id as any)}
+                        title={opt.title}
+                        className={cn(
+                          "px-3 py-1 text-[10px] font-black rounded-lg transition-all",
+                          userProfile?.accidentalPreference === opt.id ? "bg-blue-600 text-white" : "text-gray-400 hover:bg-gray-50"
+                        )}
+                      >
+                        {opt.label}
+                      </button>
+                    ))}
+                  </div>
+
                   <div className="relative group">
                     <button className="bg-white border border-gray-200 px-4 py-2 rounded-xl text-xs font-bold flex items-center gap-2">
                       <Plus className="w-4 h-4" /> Add ao Setlist
@@ -884,7 +1172,7 @@ export default function WorshipApp() {
                       value={formKey}
                       onChange={(e) => setFormKey(e.target.value)}
                     >
-                      {KEY_NAMES.map(n => <option key={n} value={n}>{n}</option>)}
+                      {ALL_KEYS.map(n => <option key={n} value={n}>{n}</option>)}
                     </select>
                   </div>
                 </div>
