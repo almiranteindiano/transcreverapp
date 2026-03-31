@@ -46,36 +46,57 @@ interface Notice {
 }
 
 // --- Constants ---
-const NOTES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
+const SHARP_NOTES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
+const FLAT_NOTES = ['C', 'Db', 'D', 'Eb', 'E', 'F', 'Gb', 'G', 'Ab', 'A', 'Bb', 'B'];
+
+// Keys that prefer flats (including their relative minors)
+const FLAT_KEYS = ['F', 'Bb', 'Eb', 'Ab', 'Db', 'Gb', 'Dm', 'Gm', 'Cm', 'Fm', 'Bbm', 'Ebm'];
+
+// Preferred key names for the 12 semitones
+const KEY_NAMES = ['C', 'Db', 'D', 'Eb', 'E', 'F', 'F#', 'G', 'Ab', 'A', 'Bb', 'B'];
+
+const getBestNoteName = (index: number, targetKey: string): string => {
+  const normalizedIndex = (index % 12 + 12) % 12;
+  // If the target key is one that prefers flats, use flat names for all chords
+  const isFlatKey = FLAT_KEYS.some(k => targetKey === k || targetKey.startsWith(k + 'm') || targetKey.startsWith(k + ' '));
+  
+  // Special case: if we are in a sharp key but the note is Bb or Eb, they are still very common
+  // But let's stick to the harmonic field rule first.
+  return isFlatKey ? FLAT_NOTES[normalizedIndex] : SHARP_NOTES[normalizedIndex];
+};
+
 const FLATS: Record<string, string> = { 'Db': 'C#', 'Eb': 'D#', 'Gb': 'F#', 'Ab': 'G#', 'Bb': 'A#' };
 
 // --- Utils ---
-const transposeChord = (chord: string, semitones: number): string => {
+const transposeChord = (chord: string, semitones: number, targetKey: string): string => {
   const match = chord.match(/^([A-G][b#]?)(.*)$/);
   if (!match) return chord;
   
   let note = match[1];
   const suffix = match[2];
   
-  if (FLATS[note]) note = FLATS[note];
+  // Normalize to sharp for indexing
+  if (note === 'Db') note = 'C#';
+  else if (note === 'Eb') note = 'D#';
+  else if (note === 'Gb') note = 'F#';
+  else if (note === 'Ab') note = 'G#';
+  else if (note === 'Bb') note = 'A#';
   
-  const index = NOTES.indexOf(note);
+  const index = SHARP_NOTES.indexOf(note);
   if (index === -1) return chord;
   
-  let newIndex = (index + semitones) % 12;
-  if (newIndex < 0) newIndex += 12;
-  
-  return NOTES[newIndex] + suffix;
+  const newIndex = (index + semitones) % 12;
+  return getBestNoteName(newIndex, targetKey) + suffix;
 };
 
-const transposeContent = (content: string, semitones: number): string => {
+const transposeContent = (content: string, semitones: number, targetKey: string): string => {
   const chordRegex = /\b[A-G][b#]?(m|maj|min|aug|dim|sus|add|2|4|5|6|7|9|11|13)*(\/[A-G][b#]?)?\b/g;
   return content.replace(chordRegex, (match) => {
     if (match.includes('/')) {
       const [base, bass] = match.split('/');
-      return transposeChord(base, semitones) + '/' + transposeChord(bass, semitones);
+      return transposeChord(base, semitones, targetKey) + '/' + transposeChord(bass, semitones, targetKey);
     }
-    return transposeChord(match, semitones);
+    return transposeChord(match, semitones, targetKey);
   });
 };
 
@@ -244,15 +265,19 @@ export default function WorshipApp() {
 
   const handleTranspose = (semitones: number) => {
     if (!selectedSong) return;
-    const newContent = transposeContent(selectedSong.content, semitones);
-    const currentIndex = NOTES.indexOf(selectedSong.key);
+    
+    const currentIndex = SHARP_NOTES.indexOf(selectedSong.key.replace('Db', 'C#').replace('Eb', 'D#').replace('Gb', 'F#').replace('Ab', 'G#').replace('Bb', 'A#'));
     let newIndex = (currentIndex + semitones) % 12;
     if (newIndex < 0) newIndex += 12;
+    
+    // Determine target key name first to guide chord naming
+    const targetKey = KEY_NAMES[newIndex];
+    const newContent = transposeContent(selectedSong.content, semitones, targetKey);
     
     const updatedSong = {
       ...selectedSong,
       content: newContent,
-      key: NOTES[newIndex]
+      key: targetKey
     };
     
     setSelectedSong(updatedSong);
@@ -334,6 +359,21 @@ export default function WorshipApp() {
       songs: []
     };
     setSetlists([newSetlist, ...setlists]);
+  };
+
+  const handleDeleteSetlist = (id: string) => {
+    if (confirm('Deseja excluir este setlist?')) {
+      setSetlists(setlists.filter(sl => sl.id !== id));
+      if (selectedSetlist?.id === id) setSelectedSetlist(null);
+    }
+  };
+
+  const handleEditSetlist = (sl: Setlist) => {
+    const newName = prompt('Novo nome do Setlist:', sl.name);
+    if (!newName) return;
+    const updatedSetlist = { ...sl, name: newName };
+    setSetlists(setlists.map(s => s.id === sl.id ? updatedSetlist : s));
+    if (selectedSetlist?.id === sl.id) setSelectedSetlist(updatedSetlist);
   };
 
   const addToSetlist = (songId: string, setlistId: string) => {
@@ -617,19 +657,23 @@ export default function WorshipApp() {
                       <p className="text-gray-400 font-medium">{selectedSetlist.date}</p>
                     </div>
                   </div>
-                  <button 
-                    onClick={() => {
-                      const text = `*Setlist: ${selectedSetlist.name}*\nData: ${selectedSetlist.date}\n\n` + 
-                        selectedSetlist.songs.map((id, i) => {
-                          const s = songs.find(x => x.id === id);
-                          return `${i+1}. ${s?.title} (${s?.key})`;
-                        }).join('\n');
-                      window.open(`https://wa.me/?text=${encodeURIComponent(text)}`, '_blank');
-                    }}
-                    className="bg-green-600 text-white px-4 py-2 rounded-xl font-bold flex items-center gap-2 hover:bg-green-700 transition-all"
-                  >
-                    <MessageCircle className="w-5 h-5" /> Compartilhar
-                  </button>
+                  <div className="flex items-center gap-2">
+                    <button onClick={() => handleEditSetlist(selectedSetlist)} className="p-2 hover:bg-gray-100 rounded-xl text-gray-400 hover:text-gray-600" title="Editar Nome"><Edit3 className="w-5 h-5" /></button>
+                    <button onClick={() => handleDeleteSetlist(selectedSetlist.id)} className="p-2 hover:bg-red-50 rounded-xl text-gray-400 hover:text-red-600" title="Excluir Setlist"><Trash2 className="w-5 h-5" /></button>
+                    <button 
+                      onClick={() => {
+                        const text = `*Setlist: ${selectedSetlist.name}*\nData: ${selectedSetlist.date}\n\n` + 
+                          selectedSetlist.songs.map((id, i) => {
+                            const s = songs.find(x => x.id === id);
+                            return `${i+1}. ${s?.title} (${s?.key})`;
+                          }).join('\n');
+                        window.open(`https://wa.me/?text=${encodeURIComponent(text)}`, '_blank');
+                      }}
+                      className="bg-green-600 text-white px-4 py-2 rounded-xl font-bold flex items-center gap-2 hover:bg-green-700 transition-all ml-2"
+                    >
+                      <MessageCircle className="w-5 h-5" /> Compartilhar
+                    </button>
+                  </div>
                 </div>
 
                 <div className="space-y-4">
@@ -775,7 +819,7 @@ export default function WorshipApp() {
                       value={formKey}
                       onChange={(e) => setFormKey(e.target.value)}
                     >
-                      {NOTES.map(n => <option key={n} value={n}>{n}</option>)}
+                      {KEY_NAMES.map(n => <option key={n} value={n}>{n}</option>)}
                     </select>
                   </div>
                 </div>
