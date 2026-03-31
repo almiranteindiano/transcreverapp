@@ -7,7 +7,8 @@ import {
   ChevronRight, ChevronLeft, Upload, FileDown,
   ArrowRightLeft, Palette, Check, X, Copy, CheckCircle2,
   Printer, MessageCircle, Menu, LogOut, Bell, Calendar,
-  Key, Settings, User, Mail, Lock, Eye, EyeOff, AlertCircle
+  Key, Settings, User, Mail, Lock, Eye, EyeOff, AlertCircle,
+  Chrome
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { clsx, type ClassValue } from 'clsx';
@@ -15,13 +16,14 @@ import { twMerge } from 'tailwind-merge';
 import { jsPDF } from 'jspdf';
 import { Document, Packer, Paragraph, TextRun } from 'docx';
 import { saveAs } from 'file-saver';
-import { auth, db } from '../lib/firebase';
+import { auth, db, googleProvider } from '../lib/firebase';
 import { 
   signInWithEmailAndPassword, 
   createUserWithEmailAndPassword, 
   onAuthStateChanged, 
   signOut,
-  updateProfile
+  updateProfile,
+  signInWithPopup
 } from 'firebase/auth';
 import { 
   collection, 
@@ -245,6 +247,19 @@ export default function WorshipApp() {
         await updateProfile(res.user, { displayName });
       }
     } catch (err: any) {
+      if (err.code === 'auth/email-already-in-use') {
+        setAuthError('Este email já está em uso. Tente fazer login ou use outro email.');
+      } else {
+        setAuthError(err.message);
+      }
+    }
+  };
+
+  const handleGoogleLogin = async () => {
+    setAuthError('');
+    try {
+      await signInWithPopup(auth, googleProvider);
+    } catch (err: any) {
       setAuthError(err.message);
     }
   };
@@ -405,6 +420,27 @@ export default function WorshipApp() {
     setIsKeySelectorOpen(false);
   };
 
+  const handleImportTXT = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file || !user) return;
+    const reader = new FileReader();
+    reader.onload = async (event) => {
+      const content = event.target?.result as string;
+      const songData = {
+        uid: user.uid,
+        title: file.name.replace('.txt', ''),
+        artist: 'Importado',
+        content: content,
+        type: activeTab === 'chords' ? 'chord' : 'lyric',
+        key: 'C',
+        originalKey: 'C',
+        createdAt: serverTimestamp()
+      };
+      await addDoc(collection(db, 'songs'), songData);
+    };
+    reader.readAsText(file);
+  };
+
   // Export Functions
   const exportTXT = (song: Song) => {
     const blob = new Blob([`${song.title} - ${song.artist}\nTom: ${song.key}\n\n${song.content}`], { type: 'text/plain' });
@@ -453,27 +489,6 @@ export default function WorshipApp() {
   const exportNoticeTXT = (notice: Notice) => {
     const blob = new Blob([`${notice.title}\nData: ${notice.date}\n\n${notice.content}`], { type: 'text/plain' });
     saveAs(blob, `${notice.title}.txt`);
-  };
-
-  const handleImportTXT = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file || !user) return;
-    const reader = new FileReader();
-    reader.onload = async (event) => {
-      const content = event.target?.result as string;
-      const songData = {
-        uid: user.uid,
-        title: file.name.replace('.txt', ''),
-        artist: 'Importado',
-        content: content,
-        type: activeTab === 'chords' ? 'chord' : 'lyric',
-        key: 'C',
-        originalKey: 'C',
-        createdAt: serverTimestamp()
-      };
-      await addDoc(collection(db, 'songs'), songData);
-    };
-    reader.readAsText(file);
   };
 
   // Setlist Functions
@@ -610,6 +625,23 @@ export default function WorshipApp() {
                 {authMode === 'login' ? 'Entrar' : 'Criar Conta'}
               </button>
             </form>
+
+            <div className="relative my-8">
+              <div className="absolute inset-0 flex items-center">
+                <div className="w-full border-t border-gray-100"></div>
+              </div>
+              <div className="relative flex justify-center text-sm">
+                <span className="px-4 bg-white text-gray-400 font-medium">Ou continuar com</span>
+              </div>
+            </div>
+
+            <button 
+              onClick={handleGoogleLogin}
+              className="w-full flex items-center justify-center gap-3 bg-white border border-gray-200 text-gray-600 py-4 rounded-2xl font-bold hover:bg-gray-50 transition-all shadow-sm"
+            >
+              <Chrome className="w-5 h-5 text-blue-600" />
+              Google
+            </button>
 
             <div className="mt-8 text-center">
               <p className="text-gray-400 text-sm">

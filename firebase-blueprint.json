@@ -1,8 +1,8 @@
 {
   "entities": {
-    "User": {
-      "title": "User",
-      "description": "User profile information",
+    "users": {
+      "title": "User Profile",
+      "description": "User profile and preferences",
       "type": "object",
       "properties": {
         "uid": { "type": "string" },
@@ -10,30 +10,29 @@
         "displayName": { "type": "string" },
         "accidentalPreference": { "type": "string", "enum": ["mixed", "sharps", "flats"] }
       },
-      "required": ["uid", "email"]
+      "required": ["uid", "email", "displayName", "accidentalPreference"]
     },
-    "Song": {
+    "songs": {
       "title": "Song",
-      "description": "A worship song with chords or lyrics",
+      "description": "Song lyrics and chords",
       "type": "object",
       "properties": {
-        "id": { "type": "string" },
         "uid": { "type": "string" },
         "title": { "type": "string" },
         "artist": { "type": "string" },
         "content": { "type": "string" },
-        "key": { "type": "string" },
         "type": { "type": "string", "enum": ["chord", "lyric"] },
+        "key": { "type": "string" },
+        "originalKey": { "type": "string" },
         "createdAt": { "type": "string", "format": "date-time" }
       },
-      "required": ["uid", "title", "content", "type"]
+      "required": ["uid", "title", "content", "type", "key", "originalKey"]
     },
-    "Setlist": {
+    "setlists": {
       "title": "Setlist",
-      "description": "A collection of songs for a specific service",
+      "description": "Collection of songs for a service",
       "type": "object",
       "properties": {
-        "id": { "type": "string" },
         "uid": { "type": "string" },
         "name": { "type": "string" },
         "date": { "type": "string" },
@@ -42,38 +41,37 @@
       },
       "required": ["uid", "name", "date", "songs"]
     },
-    "Notice": {
+    "notices": {
       "title": "Notice",
-      "description": "A notice or scale for the worship team",
+      "description": "Announcements and scales",
       "type": "object",
       "properties": {
-        "id": { "type": "string" },
         "uid": { "type": "string" },
         "title": { "type": "string" },
+        "content": { "type": "string" },
         "date": { "type": "string" },
         "type": { "type": "string", "enum": ["aviso", "escala"] },
-        "content": { "type": "string" },
         "createdAt": { "type": "string", "format": "date-time" }
       },
-      "required": ["uid", "title", "date", "type", "content"]
+      "required": ["uid", "title", "content", "date", "type"]
     }
   },
   "firestore": {
     "/users/{userId}": {
-      "schema": "User",
-      "description": "User profiles"
+      "schema": "users",
+      "description": "User profile document"
     },
     "/songs/{songId}": {
-      "schema": "Song",
-      "description": "Worship songs"
+      "schema": "songs",
+      "description": "Song documents"
     },
     "/setlists/{setlistId}": {
-      "schema": "Setlist",
-      "description": "Worship setlists"
+      "schema": "setlists",
+      "description": "Setlist documents"
     },
     "/notices/{noticeId}": {
-      "schema": "Notice",
-      "description": "Worship team notices and scales"
+      "schema": "notices",
+      "description": "Notice documents"
     }
   }
 }
