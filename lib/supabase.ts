@@ -42,8 +42,27 @@ export const supabase = new Proxy({} as SupabaseClient, {
     const instance = getSupabase();
     if (!instance) {
       console.warn('Supabase instance is not initialized. Check your environment variables.');
-      // Return a dummy object to prevent immediate crashes on property access
-      return ({} as any)[prop];
+      
+      // Return a safe no-op function or object to prevent client-side crashes
+      if (prop === 'auth') {
+        return {
+          onAuthStateChanged: () => ({ data: { subscription: { unsubscribe: () => {} } } }),
+          signInWithOAuth: () => Promise.resolve({ error: new Error('Configuração faltando') }),
+          signInWithPassword: () => Promise.resolve({ error: new Error('Configuração faltando') }),
+          signOut: () => Promise.resolve({ error: null }),
+        };
+      }
+      
+      return () => ({
+        from: () => ({
+          select: () => ({ order: () => ({ eq: () => Promise.resolve({ data: [], error: null }) }) }),
+          insert: () => ({ select: () => ({ single: () => Promise.resolve({ data: null, error: null }) }) }),
+          update: () => ({ eq: () => Promise.resolve({ data: null, error: null }) }),
+          delete: () => ({ eq: () => Promise.resolve({ data: null, error: null }) }),
+        }),
+        channel: () => ({ on: () => ({ subscribe: () => {} }) }),
+        removeChannel: () => {},
+      });
     }
     return (instance as any)[prop];
   }
