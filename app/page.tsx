@@ -5,7 +5,7 @@ import {
   Music, FileText, ListMusic, Plus, Search, 
   Download, Share2, Trash2, Edit3, Save, 
   ChevronRight, ChevronLeft, Upload, FileDown,
-  ArrowRightLeft, Palette, Check, X, Copy,
+  ArrowRightLeft, Palette, Check, X, Copy, CheckCircle2,
   Printer, MessageCircle, Menu, LogOut, Bell, Calendar
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
@@ -127,6 +127,7 @@ export default function WorshipApp() {
   const [selectedSong, setSelectedSong] = useState<Song | null>(null);
   const [selectedSetlist, setSelectedSetlist] = useState<Setlist | null>(null);
   const [selectedNotice, setSelectedNotice] = useState<Notice | null>(null);
+  const [selectedSongIds, setSelectedSongIds] = useState<string[]>([]);
 
   // Form State - Songs
   const [formTitle, setFormTitle] = useState('');
@@ -440,6 +441,7 @@ export default function WorshipApp() {
                 setSelectedSong(null); 
                 setSelectedSetlist(null); 
                 setSelectedNotice(null);
+                setSelectedSongIds([]);
                 setIsSidebarOpen(false);
               }}
               className={cn(
@@ -485,6 +487,24 @@ export default function WorshipApp() {
           </div>
 
           <div className="flex items-center gap-2 lg:gap-3 ml-4">
+            {activeTab !== 'setlists' && activeTab !== 'notices' && filteredSongs.length > 0 && (
+              <button 
+                onClick={() => {
+                  if (selectedSongIds.length === filteredSongs.length) {
+                    setSelectedSongIds([]);
+                  } else {
+                    setSelectedSongIds(filteredSongs.map(s => s.id));
+                  }
+                }}
+                className={cn(
+                  "p-2 rounded-xl transition-all border",
+                  selectedSongIds.length === filteredSongs.length ? "bg-blue-50 border-blue-200 text-blue-600" : "bg-white border-gray-200 text-gray-400 hover:bg-gray-50"
+                )}
+                title={selectedSongIds.length === filteredSongs.length ? "Desmarcar todos" : "Selecionar todos"}
+              >
+                <CheckCircle2 className="w-5 h-5" />
+              </button>
+            )}
             {activeTab !== 'setlists' && activeTab !== 'notices' && (
               <label className="cursor-pointer bg-white border border-gray-200 p-2 rounded-xl hover:bg-gray-50 transition-all shadow-sm">
                 <Upload className="w-5 h-5 text-gray-600" />
@@ -556,27 +576,72 @@ export default function WorshipApp() {
               </div>
             ) : (
               <div className="p-4 space-y-3">
-                {filteredSongs.map(song => (
-                  <button
-                    key={song.id}
-                    onClick={() => setSelectedSong(song)}
-                    className={cn(
-                      'w-full p-4 rounded-2xl border transition-all text-left group',
-                      selectedSong?.id === song.id ? 'border-blue-200 bg-blue-50' : 'border-transparent bg-white hover:border-gray-200'
-                    )}
-                  >
-                    <div className="flex justify-between items-start">
-                      <div>
-                        <p className="font-bold text-gray-900">{song.title}</p>
-                        <p className="text-xs text-gray-400">{song.artist}</p>
-                      </div>
-                      {song.type === 'chord' && (
-                        <span className="text-[10px] font-black bg-blue-100 text-blue-600 px-2 py-1 rounded-lg uppercase tracking-wider">
-                          {song.key}
-                        </span>
-                      )}
+                {selectedSongIds.length > 0 && (
+                  <div className="bg-blue-600 p-4 rounded-2xl text-white space-y-3 shadow-lg shadow-blue-200 animate-in fade-in slide-in-from-top-4 duration-300">
+                    <div className="flex items-center justify-between">
+                      <p className="text-xs font-black uppercase tracking-widest">{selectedSongIds.length} selecionados</p>
+                      <button onClick={() => setSelectedSongIds([])} className="p-1 hover:bg-white/20 rounded-lg transition-all"><X className="w-4 h-4" /></button>
                     </div>
-                  </button>
+                    <div className="relative group">
+                      <button className="w-full bg-white text-blue-600 py-2 rounded-xl text-xs font-black uppercase tracking-widest flex items-center justify-center gap-2 hover:bg-blue-50 transition-all">
+                        <Plus className="w-4 h-4" /> Add ao Setlist
+                      </button>
+                      <div className="absolute left-0 bottom-full mb-2 w-full bg-white border border-gray-200 rounded-xl shadow-xl opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-20 p-2">
+                        {setlists.map(sl => (
+                          <button 
+                            key={sl.id}
+                            onClick={() => {
+                              selectedSongIds.forEach(id => addToSetlist(id, sl.id));
+                              setSelectedSongIds([]);
+                            }}
+                            className="w-full text-left p-2 hover:bg-blue-50 rounded-lg text-xs font-medium text-gray-700"
+                          >
+                            {sl.name}
+                          </button>
+                        ))}
+                        {setlists.length === 0 && <p className="text-[10px] text-gray-400 p-2 text-center">Nenhum setlist criado</p>}
+                      </div>
+                    </div>
+                  </div>
+                )}
+                {filteredSongs.map(song => (
+                  <div key={song.id} className="relative group">
+                    <button
+                      onClick={() => setSelectedSong(song)}
+                      className={cn(
+                        'w-full p-4 rounded-2xl border transition-all text-left flex items-start gap-3',
+                        selectedSong?.id === song.id ? 'border-blue-200 bg-blue-50' : 'border-transparent bg-white hover:border-gray-200'
+                      )}
+                    >
+                      <div 
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setSelectedSongIds(prev => 
+                            prev.includes(song.id) ? prev.filter(id => id !== song.id) : [...prev, song.id]
+                          );
+                        }}
+                        className={cn(
+                          "w-5 h-5 rounded-lg border-2 flex items-center justify-center transition-all shrink-0 mt-0.5",
+                          selectedSongIds.includes(song.id) ? "bg-blue-600 border-blue-600 text-white" : "border-gray-200 bg-white"
+                        )}
+                      >
+                        {selectedSongIds.includes(song.id) && <Check className="w-3 h-3" />}
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <div className="flex justify-between items-start">
+                          <div className="truncate">
+                            <p className="font-bold text-gray-900 truncate">{song.title}</p>
+                            <p className="text-xs text-gray-400 truncate">{song.artist}</p>
+                          </div>
+                          {song.type === 'chord' && (
+                            <span className="text-[10px] font-black bg-blue-100 text-blue-600 px-2 py-1 rounded-lg uppercase tracking-wider shrink-0">
+                              {song.key}
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                    </button>
+                  </div>
                 ))}
               </div>
             )}
