@@ -1,0 +1,5 @@
+{
+  "name": "TranscreveAI - Transcrição de Vídeos e Áudios",
+  "description": "Transcreva vídeos do YouTube, Instagram, Drive e uploads locais com tradução automática e exportação para Word, PDF e TXT.",
+  "requestFramePermissions": ["camera", "microphone"]
+}
